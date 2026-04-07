@@ -1,0 +1,13 @@
+# Credenciales - nunca dentro de la imagen
+.env
+
+# Binarios locales
+sesame-bot
+sesame-bot.exe
+
+# Git
+.git
+.gitignore
+
+# Docs
+*.md

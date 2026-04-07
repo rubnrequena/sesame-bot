@@ -1,0 +1,9 @@
+# Credenciales - NUNCA subir al repositorio
+.env
+
+# Binarios
+sesame-bot
+sesame-bot.exe
+
+# Go
+go.sum
