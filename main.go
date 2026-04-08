@@ -34,13 +34,33 @@ type scheduledTime struct {
 	action actionType
 }
 
+// daySchedule contiene los horarios de entrada y salida para un día concreto
+type daySchedule struct {
+	in  []string
+	out []string
+}
+
+// dayNames mapea cada día de la semana al prefijo usado en las variables de entorno
+var dayNames = map[time.Weekday]string{
+	time.Sunday:    "SUNDAY",
+	time.Monday:    "MONDAY",
+	time.Tuesday:   "TUESDAY",
+	time.Wednesday: "WEDNESDAY",
+	time.Thursday:  "THURSDAY",
+	time.Friday:    "FRIDAY",
+	time.Saturday:  "SATURDAY",
+}
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type config struct {
-	email    string
-	password string
-	headless bool
-	schedule []scheduledTime
+	email     string
+	password  string
+	headless  bool
+	weekend   bool                         // si es false, omitir ejecución en sábado y domingo
+	hoursIn   []string                     // horario genérico de entrada
+	hoursOut  []string                     // horario genérico de salida
+	overrides map[time.Weekday]daySchedule // horarios específicos por día
 }
 
 func loadConfig() config {
@@ -58,34 +78,80 @@ func loadConfig() config {
 
 	headless := os.Getenv("HEADLESS") != "false"
 
-	var schedule []scheduledTime
+	// WEEKEND: true por defecto; false = no ejecutar en fin de semana
+	weekend := os.Getenv("WEEKEND") != "false"
 
-	for _, raw := range splitTimes(os.Getenv("HOURS_IN")) {
-		st, err := parseTime(raw, actionIn)
-		if err != nil {
-			log.Fatalf("HOURS_IN tiene un valor inválido '%s': %v", raw, err)
-		}
-		schedule = append(schedule, st)
+	hoursIn := splitTimes(os.Getenv("HOURS_IN"))
+	hoursOut := splitTimes(os.Getenv("HOURS_OUT"))
+
+	if len(hoursIn) == 0 || len(hoursOut) == 0 {
+		log.Fatal("SESAME_EMAIL, SESAME_PASSWORD, HOURS_IN y HOURS_OUT son requeridos. Debes configurar valores en ambos para operar el scheduler.")
 	}
 
-	for _, raw := range splitTimes(os.Getenv("HOURS_OUT")) {
-		st, err := parseTime(raw, actionOut)
-		if err != nil {
-			log.Fatalf("HOURS_OUT tiene un valor inválido '%s': %v", raw, err)
+	// Leer overrides por día: MONDAY_IN, FRIDAY_OUT, etc.
+	overrides := make(map[time.Weekday]daySchedule)
+	for weekday, prefix := range dayNames {
+		in := splitTimes(os.Getenv(prefix + "_IN"))
+		out := splitTimes(os.Getenv(prefix + "_OUT"))
+		if len(in) > 0 || len(out) > 0 {
+			overrides[weekday] = daySchedule{in: in, out: out}
 		}
-		schedule = append(schedule, st)
-	}
-
-	if len(schedule) == 0 {
-		log.Fatal("Debes configurar al menos una hora en HOURS_IN o HOURS_OUT")
 	}
 
 	return config{
-		email:    email,
-		password: password,
-		headless: headless,
-		schedule: schedule,
+		email:     email,
+		password:  password,
+		headless:  headless,
+		weekend:   weekend,
+		hoursIn:   hoursIn,
+		hoursOut:  hoursOut,
+		overrides: overrides,
 	}
+}
+
+// getScheduleForDay devuelve los scheduledTime para el día indicado.
+// Aplica el override del día si existe; si no, usa el horario genérico.
+// Devuelve nil si es fin de semana y weekend=false.
+func getScheduleForDay(cfg config, day time.Weekday) []scheduledTime {
+	isWeekend := day == time.Saturday || day == time.Sunday
+	if isWeekend && !cfg.weekend {
+		return nil
+	}
+
+	// Determinar las horas de entrada y salida para este día
+	inTimes := cfg.hoursIn
+	outTimes := cfg.hoursOut
+
+	if override, ok := cfg.overrides[day]; ok {
+		if len(override.in) > 0 {
+			inTimes = override.in
+		}
+		if len(override.out) > 0 {
+			outTimes = override.out
+		}
+	}
+
+	var schedule []scheduledTime
+
+	for _, raw := range inTimes {
+		st, err := parseTime(raw, actionIn)
+		if err != nil {
+			log.Printf("⚠️  Hora IN inválida '%s': %v", raw, err)
+			continue
+		}
+		schedule = append(schedule, st)
+	}
+
+	for _, raw := range outTimes {
+		st, err := parseTime(raw, actionOut)
+		if err != nil {
+			log.Printf("⚠️  Hora OUT inválida '%s': %v", raw, err)
+			continue
+		}
+		schedule = append(schedule, st)
+	}
+
+	return schedule
 }
 
 func splitTimes(raw string) []string {
@@ -119,13 +185,14 @@ func main() {
 	cfg := loadConfig()
 
 	log.Println("Bot de Sesame Time iniciado")
-	log.Printf("Modo headless: %v", cfg.headless)
-	log.Println("Horario configurado:")
-	for _, st := range cfg.schedule {
-		log.Printf("  %02d:%02d → %s", st.hour, st.minute, st.action)
+	log.Printf("Modo headless : %v", cfg.headless)
+	log.Printf("Ejecutar fines de semana: %v", cfg.weekend)
+	log.Printf("Horario genérico IN : %v", cfg.hoursIn)
+	log.Printf("Horario genérico OUT: %v", cfg.hoursOut)
+	for day, ov := range cfg.overrides {
+		log.Printf("Override %s → IN:%v OUT:%v", dayNames[day], ov.in, ov.out)
 	}
 
-	// Conjunto de acciones ya ejecutadas en la jornada actual (evita doble ejecución)
 	executed := map[string]bool{}
 	lastDate := ""
 
@@ -139,10 +206,20 @@ func main() {
 		if today != lastDate {
 			executed = map[string]bool{}
 			lastDate = today
+			schedule := getScheduleForDay(cfg, now.Weekday())
+			if schedule == nil {
+				log.Printf("📅 %s es fin de semana — no se ejecutarán acciones", dayNames[now.Weekday()])
+			} else {
+				log.Printf("📅 Horario de hoy (%s):", dayNames[now.Weekday()])
+				for _, st := range schedule {
+					log.Printf("   %02d:%02d → %s", st.hour, st.minute, st.action)
+				}
+			}
 		}
 
-		for _, st := range cfg.schedule {
-			key := fmt.Sprintf("%s-%02d:%02d", today, st.hour, st.minute)
+		schedule := getScheduleForDay(cfg, now.Weekday())
+		for _, st := range schedule {
+			key := fmt.Sprintf("%s-%02d:%02d-%s", today, st.hour, st.minute, st.action)
 			if executed[key] {
 				continue
 			}
@@ -165,7 +242,6 @@ func main() {
 // ─── Acción completa: login → click → esperar → logout ───────────────────────
 
 func runAction(cfg config, action actionType) error {
-	// Abrir browser
 	u := launcher.New().
 		Headless(cfg.headless).
 		Set("disable-blink-features", "AutomationControlled").
@@ -211,10 +287,10 @@ func runAction(cfg config, action actionType) error {
 	}
 	log.Printf("Click en %q realizado. Esperando 5 segundos...", buttonText)
 
-	// 4. Esperar 5 segundos
+	// 3. Esperar 5 segundos
 	time.Sleep(5 * time.Second)
 
-	// 5. Cerrar sesión
+	// 4. Cerrar sesión
 	log.Println("Cerrando sesión...")
 	if err := doLogout(page); err != nil {
 		return fmt.Errorf("logout: %w", err)
@@ -293,7 +369,6 @@ func doLogin(page *rod.Page, email, password string) error {
 // ─── Logout ───────────────────────────────────────────────────────────────────
 
 func doLogout(page *rod.Page) error {
-	// Abrir menú de perfil
 	profileBtn, err := page.Timeout(actionTimeout).Element(".headerProfileName")
 	if err != nil {
 		return fmt.Errorf("botón .headerProfileName no encontrado: %w", err)
@@ -302,7 +377,6 @@ func doLogout(page *rod.Page) error {
 		return fmt.Errorf("click en .headerProfileName: %w", err)
 	}
 
-	// Hacer click en logout
 	logoutBtn, err := page.Timeout(actionTimeout).Element("#click-admin-header-logout")
 	if err != nil {
 		return fmt.Errorf("botón #click-admin-header-logout no encontrado: %w", err)
