@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,12 @@ type daySchedule struct {
 	out []string
 }
 
+// location contiene coordenadas de geolocalización
+type location struct {
+	lat float64
+	lon float64
+}
+
 // dayNames mapea cada día de la semana al prefijo usado en las variables de entorno
 var dayNames = map[time.Weekday]string{
 	time.Sunday:    "SUNDAY",
@@ -54,13 +61,16 @@ var dayNames = map[time.Weekday]string{
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 type config struct {
-	email     string
-	password  string
-	headless  bool
-	weekend   bool                         // si es false, omitir ejecución en sábado y domingo
-	hoursIn   []string                     // horario genérico de entrada
-	hoursOut  []string                     // horario genérico de salida
-	overrides map[time.Weekday]daySchedule // horarios específicos por día
+	email          string
+	password       string
+	headless       bool
+	weekend        bool                         // si es false, omitir ejecución en sábado y domingo
+	hoursIn        []string                     // horario genérico de entrada
+	hoursOut       []string                     // horario genérico de salida
+	overrides      map[time.Weekday]daySchedule // horarios específicos por día
+	locationOffice location                     // coordenadas de la oficina
+	locationHome   location                     // coordenadas de casa
+	officeDays     map[time.Weekday]bool        // días que se va a la oficina
 }
 
 func loadConfig() config {
@@ -98,14 +108,30 @@ func loadConfig() config {
 		}
 	}
 
+	// Geolocalización
+	locationOffice, err := parseLocation(os.Getenv("LOCATION_OFFICE"))
+	if err != nil {
+		log.Fatalf("LOCATION_OFFICE inválido: %v", err)
+	}
+	locationHome, err := parseLocation(os.Getenv("LOCATION_HOME"))
+	if err != nil {
+		log.Fatalf("LOCATION_HOME inválido: %v", err)
+	}
+
+	// Días de oficina: OFFICE_DAYS=Tuesday,Thursday
+	officeDays := parseOfficeDays(os.Getenv("OFFICE_DAYS"))
+
 	return config{
-		email:     email,
-		password:  password,
-		headless:  headless,
-		weekend:   weekend,
-		hoursIn:   hoursIn,
-		hoursOut:  hoursOut,
-		overrides: overrides,
+		email:          email,
+		password:       password,
+		headless:       headless,
+		weekend:        weekend,
+		hoursIn:        hoursIn,
+		hoursOut:       hoursOut,
+		overrides:      overrides,
+		locationOffice: locationOffice,
+		locationHome:   locationHome,
+		officeDays:     officeDays,
 	}
 }
 
@@ -152,6 +178,59 @@ func getScheduleForDay(cfg config, day time.Weekday) []scheduledTime {
 	}
 
 	return schedule
+}
+
+// parseLocation parsea "latitud,longitud" desde una variable de entorno
+func parseLocation(raw string) (location, error) {
+	if raw == "" {
+		return location{}, nil
+	}
+	parts := strings.SplitN(raw, ",", 2)
+	if len(parts) != 2 {
+		return location{}, fmt.Errorf("formato esperado: latitud,longitud (ej: 40.4168,-3.7038)")
+	}
+	lat, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	if err != nil {
+		return location{}, fmt.Errorf("latitud inválida: %v", err)
+	}
+	lon, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err != nil {
+		return location{}, fmt.Errorf("longitud inválida: %v", err)
+	}
+	return location{lat: lat, lon: lon}, nil
+}
+
+// parseOfficeDays parsea "Tuesday,Thursday" y devuelve un mapa de weekdays
+// Acepta coma o = como separador para mayor flexibilidad
+func parseOfficeDays(raw string) map[time.Weekday]bool {
+	result := make(map[time.Weekday]bool)
+	if raw == "" {
+		return result
+	}
+	// Normalizar separadores: reemplazar = por ,
+	raw = strings.ReplaceAll(raw, "=", ",")
+	nameToWeekday := map[string]time.Weekday{
+		"sunday": time.Sunday, "monday": time.Monday, "tuesday": time.Tuesday,
+		"wednesday": time.Wednesday, "thursday": time.Thursday,
+		"friday": time.Friday, "saturday": time.Saturday,
+	}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(strings.ToLower(part))
+		if wd, ok := nameToWeekday[part]; ok {
+			result[wd] = true
+		} else if part != "" {
+			log.Printf("⚠️  Día desconocido en OFFICE_DAYS: '%s'", part)
+		}
+	}
+	return result
+}
+
+// getLocationForDay devuelve las coordenadas según si el día es de oficina o de casa
+func getLocationForDay(cfg config, day time.Weekday) location {
+	if cfg.officeDays[day] {
+		return cfg.locationOffice
+	}
+	return cfg.locationHome
 }
 
 func splitTimes(raw string) []string {
@@ -252,6 +331,31 @@ func runAction(cfg config, action actionType) error {
 	defer browser.MustClose()
 
 	page := browser.MustPage("").Timeout(pageTimeout)
+
+	// Aplicar geolocalización según el día (oficina o casa)
+	loc := getLocationForDay(cfg, time.Now().Weekday())
+	if loc.lat != 0 || loc.lon != 0 {
+		accuracy := 10.0
+		geoCmd := proto.EmulationSetGeolocationOverride{
+			Latitude:  &loc.lat,
+			Longitude: &loc.lon,
+			Accuracy:  &accuracy,
+		}
+		if err := geoCmd.Call(page); err != nil {
+			return fmt.Errorf("establecer geolocalización: %w", err)
+		}
+		// Conceder permiso de geolocalización automáticamente
+		permCmd := proto.BrowserGrantPermissions{
+			Permissions: []proto.BrowserPermissionType{
+				proto.BrowserPermissionTypeGeolocation,
+			},
+			Origin: loginURL,
+		}
+		if err := permCmd.Call(browser); err != nil {
+			return fmt.Errorf("conceder permiso de geolocalización: %w", err)
+		}
+		log.Printf("📍 Geolocalización aplicada: %.6f, %.6f", loc.lat, loc.lon)
+	}
 
 	// 1. Login
 	log.Println("Navegando al login...")
