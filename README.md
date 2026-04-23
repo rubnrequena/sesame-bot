@@ -1,63 +1,116 @@
-```# 🕰️ Sesame Time Bot
+# 🕰️ Sesame Time Bot
 
-This bot automates the process of logging attendance (clocking IN or OUT) on the Sesame Time application. It runs as a background scheduler, checking the current time against predefined schedules and performing necessary actions using browser automation.
+Bot que automatiza el fichaje de entrada y salida en la aplicación Sesame Time. Funciona como un scheduler en segundo plano que comprueba la hora actual contra los horarios configurados y ejecuta las acciones necesarias mediante automatización de navegador.
 
-## 🚀 Features
+Incluye una **interfaz web de administración** para modificar la configuración en caliente, sin necesidad de reiniciar el servicio.
 
-*   **Automated Scheduling:** Executes actions only at specified times (`HH:MM`).
-*   **Flexible Scheduling:** Supports both general weekly schedules and day-specific overrides.
-*   **Day Control:** Can be configured to run only on weekdays or on weekends.
-*   **Robust Automation:** Handles the entire workflow: Login $\rightarrow$ Action Click $\rightarrow$ Logout.
+## 🚀 Funcionalidades
 
-## ⚙️ Configuration & Setup
+- **Scheduling automático:** Ejecuta acciones únicamente a las horas configuradas (`HH:MM`).
+- **Horarios flexibles:** Soporta horario genérico semanal y overrides por día específico.
+- **Control de fin de semana:** Configurable para ejecutar solo en días laborables.
+- **Geolocalización:** Simula ubicación GPS diferente según si el día es de oficina o teletrabajo.
+- **UI de administración:** Formulario web protegido por contraseña para editar la configuración sin tocar el `.env`.
 
-This project relies heavily on environment variables. Before running, you must ensure a `.env` file (or system environment variables) contains the necessary credentials and schedule details.
+## ⚙️ Configuración
 
-### 1. Required Environment Variables
+Copia `.env.example` como `.env` y rellena los valores:
 
-The bot *requires* the following credentials:
+```bash
+cp .env.example .env
+```
 
-| Variable | Description | Example Value |
+### Variables requeridas
+
+| Variable | Descripción | Ejemplo |
 | :--- | :--- | :--- |
-| `SESAME_EMAIL` | Your work email address for logging in. | `user@example.com` |
-| `SESAME_PASSWORD` | Your password for the Sesame Time application. | `your_secure_password` |
-| `HOURS_IN` | **Mandatory.** Comma-separated list of *general* time slots for clocking IN (e.g., `08:00, 09:30`). | `08:00,17:00` |
-| `HOURS_OUT` | **Mandatory.** Comma-separated list of *general* time slots for clocking OUT. | `18:00` |
+| `SESAME_EMAIL` | Email de acceso a Sesame Time | `user@empresa.com` |
+| `SESAME_PASSWORD` | Contraseña de Sesame Time | `tu_contraseña` |
+| `HOURS_IN` | Horas de entrada separadas por coma (`HH:MM`) | `09:00` o `09:00,14:00` |
+| `HOURS_OUT` | Horas de salida separadas por coma (`HH:MM`) | `18:00` o `13:00,18:00` |
 
-### 2. Optional Environment Variables
+### Variables opcionales — comportamiento
 
-These variables control the behavior and schedule of the bot:
+| Variable | Descripción | Por defecto |
+| :--- | :--- | :--- |
+| `HEADLESS` | `false` para ver el navegador (debug) | `true` |
+| `WEEKEND` | `true` para ejecutar también en sábado y domingo | `false` |
+| `MONDAY_IN`, `FRIDAY_OUT`, etc. | Override de horario para un día concreto. Formato: `DAYNAME_IN` / `DAYNAME_OUT`. Días disponibles: `SUNDAY`, `MONDAY`, `TUESDAY`, `WEDNESDAY`, `THURSDAY`, `FRIDAY`, `SATURDAY` | — |
 
-| Variable | Description | Type | Default/Notes |
-| :--- | :--- | :--- | :--- |
-| `HEADLESS` | Runs the browser in the background (headless mode). | String | Set to `"false"` to watch the automation process run visually. |
-| `WEEKEND` | Controls execution on Saturday/Sunday. | String | Set to `"false"` to prevent running on weekends. |
-| `MONDAY_IN`, `MONDAY_OUT`, etc. | Overrides for specific days. Use `DAYNAME_ACTION` (e.g., `WEDNESDAY_IN`). | String | Takes precedence over `HOURS_IN`/`HOURS_OUT`. |
+### Variables opcionales — geolocalización
 
-**Scheduling Notes:**
-*   Times in all scheduling variables must be in `HH:MM` format.
-*   Multiple times for the same action/day should be separated by commas (e.g., `"08:00,12:00"`).
+Permiten simular la ubicación GPS del dispositivo al fichar, útil si Sesame Time registra la posición.
 
-## 🛠️ How It Works (Execution Flow)
+| Variable | Descripción | Ejemplo |
+| :--- | :--- | :--- |
+| `LOCATION_OFFICE` | Coordenadas de la oficina (`latitud,longitud`) | `40.4162,-3.7038` |
+| `LOCATION_HOME` | Coordenadas de casa (`latitud,longitud`) | `40.1234,-3.4567` |
+| `OFFICE_DAYS` | Días en que se aplica `LOCATION_OFFICE`. El resto usa `LOCATION_HOME`. Separados por coma. | `Tuesday,Thursday` |
 
-The bot operates as a continuous scheduler:
+### Variables opcionales — UI de administración
 
-1.  **Initialization:** Reads and parses all necessary credentials and schedules from the environment.
-2.  **Scheduler Loop:** Enters a loop, checking the system time every 30 seconds.
-3.  **Schedule Check:** Compares the current date/time against the loaded schedule for the current day, respecting any day-specific overrides.
-4.  **Action Trigger:** If the current time matches a scheduled time, it executes the `runAction` sequence.
-5.  **`runAction` Details:**
-    *   Launches a Chrome browser instance (headless by default).
-    *   Navigates to the specified login URL (`https://app.sesametime.com/login`).
-    *   Authenticates using the provided credentials.
-    *   Locates and clicks the button corresponding to the action (`Entrar` for IN, `Salir` for OUT).
-    *   Pauses for 5 seconds (a simulated buffer period).
-    *   Logs out of the session to complete the cycle.
+| Variable | Descripción | Por defecto |
+| :--- | :--- | :--- |
+| `ADMIN_PORT` | Puerto del servidor web de administración | `8080` |
+| `ADMIN_PASSWORD` | Contraseña para acceder a la UI web | — (requerida para usar la UI) |
 
-## 🐛 Troubleshooting & Debugging
+## 🖥️ Interfaz web de administración
 
-If the bot fails to clock in or out, check these items:
+El bot expone un servidor HTTP que permite modificar la configuración sin editar el `.env` ni reiniciar el servicio.
 
-1.  **Credentials:** Verify `SESAME_EMAIL` and `SESAME_PASSWORD` are correctly set in the environment.
-2.  **Selectors:** The bot relies on specific CSS selectors (e.g., `#btn-next-login`, `.headerProfileName`). If Sesame Time updates its web interface, these selectors in `main.go` must be updated manually.
-3.  **Mandatory Variables:** Ensure both `HOURS_IN` AND `HOURS_OUT` are set in the environment, as required by the current validation logic.
+### Acceso
+
+Con el bot en ejecución, abre en el navegador:
+
+```
+http://localhost:8080/login
+```
+
+Introduce el valor de `ADMIN_PASSWORD` para acceder.
+
+### Qué se puede configurar
+
+| Campo | Variable |
+| :--- | :--- |
+| Horas de entrada | `HOURS_IN` |
+| Horas de salida | `HOURS_OUT` |
+| Ejecutar en fin de semana | `WEEKEND` |
+| Coordenadas de oficina | `LOCATION_OFFICE` |
+| Coordenadas de casa | `LOCATION_HOME` |
+| Días de oficina | `OFFICE_DAYS` |
+
+Al guardar, los cambios se aplican **inmediatamente** al scheduler en memoria y se persisten en el archivo `.env`, por lo que sobreviven a un reinicio del servicio.
+
+> **Nota Docker:** Si usas `--env-file` sin montar el `.env` como volumen, los cambios se aplican en memoria pero no persisten al reiniciar el contenedor. Monta el archivo para persistencia:
+> ```bash
+> docker run -v $(pwd)/.env:/app/.env --env-file .env ...
+> ```
+
+## 🐳 Docker
+
+```bash
+# Construir imagen
+make build
+
+# Ejecutar
+docker run -v $(pwd)/.env:/app/.env --env-file .env -p 8080:8080 rubn1987/sesame-bot:latest
+```
+
+## 🛠️ Cómo funciona
+
+1. **Arranque:** Lee y parsea credenciales y horarios desde el entorno.
+2. **Scheduler:** Bucle infinito que comprueba la hora cada 30 segundos.
+3. **Comprobación:** Compara hora actual con el horario del día (aplicando overrides si existen).
+4. **Ejecución:** Al coincidir la hora, lanza `runAction`:
+   - Abre Chrome (headless por defecto)
+   - Aplica geolocalización GPS si está configurada
+   - Navega a `https://app.sesametime.com/login` y hace login
+   - Pulsa `Entrar` o `Salir` según corresponda
+   - Espera 5 segundos y cierra sesión
+
+## 🐛 Troubleshooting
+
+1. **Credenciales:** Verifica `SESAME_EMAIL` y `SESAME_PASSWORD` en el `.env`.
+2. **Selectores CSS:** Si Sesame Time actualiza su interfaz, los selectores en `main.go` (`#btn-next-login`, `.headerProfileName`, etc.) pueden necesitar actualización.
+3. **Horario no ejecuta:** Asegúrate de que `HOURS_IN` y `HOURS_OUT` están definidos. El bot comprueba cada 30 segundos, por lo que puede tardar hasta 30 s en reaccionar.
+4. **UI no accesible:** Verifica que `ADMIN_PASSWORD` está definido y que el puerto `ADMIN_PORT` no está bloqueado por el firewall.
