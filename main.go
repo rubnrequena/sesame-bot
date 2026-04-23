@@ -73,32 +73,22 @@ type config struct {
 	officeDays     map[time.Weekday]bool        // días que se va a la oficina
 }
 
-func loadConfig() config {
-	// Cargar .env si existe (desarrollo local).
-	// En Docker las variables llegan por --env-file, así que no es obligatorio.
-	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
-		log.Fatal("Error cargando archivo .env: ", err)
-	}
-
+func buildConfig() (config, error) {
 	email := os.Getenv("SESAME_EMAIL")
 	password := os.Getenv("SESAME_PASSWORD")
 	if email == "" || password == "" {
-		log.Fatal("SESAME_EMAIL y SESAME_PASSWORD son requeridos en el archivo .env")
+		return config{}, fmt.Errorf("SESAME_EMAIL y SESAME_PASSWORD son requeridos")
 	}
 
 	headless := os.Getenv("HEADLESS") != "false"
-
-	// WEEKEND: true por defecto; false = no ejecutar en fin de semana
 	weekend := os.Getenv("WEEKEND") != "false"
 
 	hoursIn := splitTimes(os.Getenv("HOURS_IN"))
 	hoursOut := splitTimes(os.Getenv("HOURS_OUT"))
-
 	if len(hoursIn) == 0 || len(hoursOut) == 0 {
-		log.Fatal("SESAME_EMAIL, SESAME_PASSWORD, HOURS_IN y HOURS_OUT son requeridos. Debes configurar valores en ambos para operar el scheduler.")
+		return config{}, fmt.Errorf("HOURS_IN y HOURS_OUT son requeridos")
 	}
 
-	// Leer overrides por día: MONDAY_IN, FRIDAY_OUT, etc.
 	overrides := make(map[time.Weekday]daySchedule)
 	for weekday, prefix := range dayNames {
 		in := splitTimes(os.Getenv(prefix + "_IN"))
@@ -108,17 +98,15 @@ func loadConfig() config {
 		}
 	}
 
-	// Geolocalización
 	locationOffice, err := parseLocation(os.Getenv("LOCATION_OFFICE"))
 	if err != nil {
-		log.Fatalf("LOCATION_OFFICE inválido: %v", err)
+		return config{}, fmt.Errorf("LOCATION_OFFICE inválido: %v", err)
 	}
 	locationHome, err := parseLocation(os.Getenv("LOCATION_HOME"))
 	if err != nil {
-		log.Fatalf("LOCATION_HOME inválido: %v", err)
+		return config{}, fmt.Errorf("LOCATION_HOME inválido: %v", err)
 	}
 
-	// Días de oficina: OFFICE_DAYS=Tuesday,Thursday
 	officeDays := parseOfficeDays(os.Getenv("OFFICE_DAYS"))
 
 	return config{
@@ -132,7 +120,20 @@ func loadConfig() config {
 		locationOffice: locationOffice,
 		locationHome:   locationHome,
 		officeDays:     officeDays,
+	}, nil
+}
+
+func loadConfig() config {
+	// Cargar .env si existe (desarrollo local).
+	// En Docker las variables llegan por --env-file, así que no es obligatorio.
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		log.Fatal("Error cargando archivo .env: ", err)
 	}
+	cfg, err := buildConfig()
+	if err != nil {
+		log.Fatal("Error en configuración: ", err)
+	}
+	return cfg
 }
 
 // getScheduleForDay devuelve los scheduledTime para el día indicado.
@@ -262,6 +263,7 @@ func parseTime(raw string, action actionType) (scheduledTime, error) {
 
 func main() {
 	cfg := loadConfig()
+	holder := &configHolder{cfg: cfg}
 
 	log.Println("Bot de Sesame Time iniciado")
 	log.Printf("Modo headless : %v", cfg.headless)
@@ -272,6 +274,8 @@ func main() {
 		log.Printf("Override %s → IN:%v OUT:%v", dayNames[day], ov.in, ov.out)
 	}
 
+	go startWebServer(holder)
+
 	executed := map[string]bool{}
 	lastDate := ""
 
@@ -280,6 +284,7 @@ func main() {
 	for {
 		now := time.Now()
 		today := now.Format("2006-01-02")
+		cfg := holder.get()
 
 		// Resetear el registro de ejecuciones al comenzar un nuevo día
 		if today != lastDate {
