@@ -128,10 +128,13 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
       letter-spacing: .05em;
       margin-top: 1.25rem;
     }
-    input[type=password] {
-      width: 100%;
-      padding: .65rem .85rem;
+    .pw-wrap {
+      position: relative;
       margin-top: .4rem;
+    }
+    input[type=password], input[type=text].pw-field {
+      width: 100%;
+      padding: .65rem 2.8rem .65rem .85rem;
       border: 1.5px solid #e0e0e5;
       border-radius: 10px;
       font-size: 1rem;
@@ -140,12 +143,30 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
       outline: none;
       transition: border-color .15s, box-shadow .15s;
     }
-    input[type=password]:focus {
+    input[type=password]:focus, input[type=text].pw-field:focus {
       border-color: #0071e3;
       box-shadow: 0 0 0 3px rgba(0,113,227,.12);
       background: #fff;
     }
-    button {
+    .pw-toggle {
+      position: absolute;
+      right: .65rem;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      margin: 0;
+      padding: .25rem;
+      width: auto;
+      cursor: pointer;
+      color: #aeaeb2;
+      display: flex;
+      align-items: center;
+      transition: color .15s;
+    }
+    .pw-toggle:hover { color: #1d1d1f; background: none; }
+    .pw-toggle:active { transform: translateY(-50%) scale(.9); }
+    button[type=submit] {
       width: 100%;
       margin-top: 1.5rem;
       padding: .7rem;
@@ -158,8 +179,8 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
       cursor: pointer;
       transition: background .15s, transform .1s;
     }
-    button:hover { background: #0077ed; }
-    button:active { transform: scale(.98); }
+    button[type=submit]:hover { background: #0077ed; }
+    button[type=submit]:active { transform: scale(.98); }
     .error {
       display: flex;
       align-items: center;
@@ -177,13 +198,38 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
   <div class="card">
     <h2>Sesame Bot</h2>
     <form method="POST" action="/login">
-      <label>Contraseña de administrador
-        <input type="password" name="password" autofocus required>
-      </label>
+      <label>Contraseña de administrador</label>
+      <div class="pw-wrap">
+        <input id="pw" type="password" name="password" class="pw-field" autofocus required>
+        <button type="button" class="pw-toggle" onclick="togglePw()" aria-label="Mostrar contraseña">
+          <svg id="icon-show" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+          <svg id="icon-hide" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>
+          </svg>
+        </button>
+      </div>
       {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
       <button type="submit">Entrar</button>
     </form>
   </div>
+  <script>
+    function togglePw() {
+      var inp = document.getElementById('pw');
+      var show = document.getElementById('icon-show');
+      var hide = document.getElementById('icon-hide');
+      if (inp.type === 'password') {
+        inp.type = 'text';
+        show.style.display = 'none';
+        hide.style.display = '';
+      } else {
+        inp.type = 'password';
+        show.style.display = '';
+        hide.style.display = 'none';
+      }
+    }
+  </script>
 </body>
 </html>`))
 
