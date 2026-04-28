@@ -1,0 +1,43 @@
+{{template "base.html" .}}
+{{define "title"}}Sesame Bot — Logs de usuario{{end}}
+{{define "nav"}}
+<nav>
+  <a href="/" class="brand">Sesame Bot</a>
+  <a href="/dashboard">Dashboard</a>
+  <a href="/config">Configuración</a>
+  <a href="/logs">Historial</a>
+  <a href="/admin">Admin</a>
+  <span class="spacer"></span>
+  <span style="font-size:.8rem;color:#aeaeb2">{{.User.Email}}</span>
+  <form method="POST" action="/logout" style="display:inline">
+    <button type="submit" class="btn btn-ghost btn-sm">Salir</button>
+  </form>
+</nav>
+{{end}}
+{{define "content"}}
+<div class="card">
+  <a href="/admin" style="font-size:.875rem;color:#0071e3;text-decoration:none">← Volver al admin</a>
+  <h1 style="margin-top:1rem">Logs: {{.TargetUser.Email}}</h1>
+  {{if .Logs}}
+  <table>
+    <thead><tr><th>Fecha/Hora</th><th>Acción</th><th>Estado</th><th>Detalle</th></tr></thead>
+    <tbody>
+    {{range .Logs}}
+    <tr>
+      <td>{{.ExecutedAt.Format "02/01/2006 15:04:05"}}</td>
+      <td><strong>{{.Action}}</strong></td>
+      <td>
+        {{if eq .Status "ok"}}<span class="badge badge-ok">OK</span>
+        {{else if eq .Status "error"}}<span class="badge badge-err">Error</span>
+        {{else}}<span class="badge badge-skip">Omitido</span>{{end}}
+      </td>
+      <td style="color:#6e6e73;font-size:.825rem">{{.Message}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p style="color:#aeaeb2;font-size:.875rem">Sin fichajes registrados para este usuario.</p>
+  {{end}}
+</div>
+{{end}}
