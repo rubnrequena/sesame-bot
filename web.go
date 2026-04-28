@@ -1,442 +1,693 @@
 package main
 
 import (
-	"bufio"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/hex"
-	"fmt"
+	"context"
+	"embed"
 	"html/template"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
+
+	appdb "sesame-bot/internal/db"
+	appcrypto "sesame-bot/internal/crypto"
+	"sesame-bot/internal/models"
+	"sesame-bot/internal/scheduler"
 )
 
-// ─── Config holder (thread-safe) ─────────────────────────────────────────────
+//go:embed templates
+var templateFS embed.FS
 
-type configHolder struct {
-	mu  sync.RWMutex
-	cfg config
+const cookieName = "sesame_session"
+const defaultPort = "8080"
+
+// userContextKey is used to store the authenticated user in request context.
+type userContextKey struct{}
+
+// ─── Template helpers ─────────────────────────────────────────────────────────
+
+var tmplFuncs = template.FuncMap{
+	"not": func(b bool) bool { return !b },
 }
 
-func (h *configHolder) get() config {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.cfg
+func parseTemplates(name string) *template.Template {
+	return template.Must(
+		template.New("base.html").Funcs(tmplFuncs).ParseFS(templateFS, "templates/base.html", "templates/"+name),
+	)
 }
 
-func (h *configHolder) set(c config) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.cfg = c
-}
+// ─── Auth middleware ──────────────────────────────────────────────────────────
 
-// ─── Session store ────────────────────────────────────────────────────────────
-
-const (
-	cookieName  = "sesame_session"
-	sessionTTL  = 24 * time.Hour
-	defaultPort = "8080"
-)
-
-type sessionStore struct {
-	mu     sync.Mutex
-	tokens map[string]time.Time
-}
-
-func newSessionStore() *sessionStore {
-	return &sessionStore{tokens: make(map[string]time.Time)}
-}
-
-func (s *sessionStore) create() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+func requireAuth(pool *pgxpool.Pool, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie(cookieName)
+		if err != nil {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		user, err := appdb.GetSessionUser(r.Context(), pool, cookie.Value)
+		if err != nil {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		ctx := context.WithValue(r.Context(), userContextKey{}, user)
+		next(w, r.WithContext(ctx))
 	}
-	token := hex.EncodeToString(b)
-	s.mu.Lock()
-	s.tokens[token] = time.Now().Add(sessionTTL)
-	s.mu.Unlock()
-	return token, nil
 }
 
-func (s *sessionStore) validate(token string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	expiry, ok := s.tokens[token]
-	if !ok {
-		return false
+func requireAdmin(pool *pgxpool.Pool, next http.HandlerFunc) http.HandlerFunc {
+	return requireAuth(pool, func(w http.ResponseWriter, r *http.Request) {
+		user := r.Context().Value(userContextKey{}).(*models.User)
+		if !user.IsAdmin {
+			http.Error(w, "Acceso denegado", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	})
+}
+
+func currentUser(r *http.Request) *models.User {
+	u, _ := r.Context().Value(userContextKey{}).(*models.User)
+	return u
+}
+
+// ─── Register ─────────────────────────────────────────────────────────────────
+
+func handleRegister(pool *pgxpool.Pool) http.HandlerFunc {
+	type data struct {
+		Error string
+		Email string
 	}
-	if time.Now().After(expiry) {
-		delete(s.tokens, token)
-		return false
+	tmpl := parseTemplates("register.html")
+	render := func(w http.ResponseWriter, d data) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, d); err != nil {
+			log.Printf("register render: %v", err)
+		}
 	}
-	return true
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Only allow registration when no users exist yet
+		count, err := appdb.CountUsers(r.Context(), pool)
+		if err != nil {
+			http.Error(w, "Error interno", http.StatusInternalServerError)
+			return
+		}
+		if count > 0 {
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+
+		if r.Method == http.MethodGet {
+			render(w, data{})
+			return
+		}
+
+		email := strings.TrimSpace(r.FormValue("email"))
+		password := r.FormValue("password")
+
+		if email == "" || len(password) < 8 {
+			render(w, data{Error: "El correo y la contraseña (mínimo 8 caracteres) son obligatorios", Email: email})
+			return
+		}
+
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+		if err != nil {
+			http.Error(w, "Error interno", http.StatusInternalServerError)
+			return
+		}
+
+		// First user is always admin
+		user, err := appdb.CreateUser(r.Context(), pool, email, string(hash), true)
+		if err != nil {
+			render(w, data{Error: "Error creando el usuario: " + err.Error(), Email: email})
+			return
+		}
+
+		token, err := appdb.CreateSession(r.Context(), pool, user.ID)
+		if err != nil {
+			http.Error(w, "Error interno", http.StatusInternalServerError)
+			return
+		}
+		setSessionCookie(w, token)
+		http.Redirect(w, r, "/dashboard", http.StatusFound)
+	}
 }
 
-func (s *sessionStore) revoke(token string) {
-	s.mu.Lock()
-	delete(s.tokens, token)
-	s.mu.Unlock()
+// ─── Login ────────────────────────────────────────────────────────────────────
+
+func handleLogin(pool *pgxpool.Pool) http.HandlerFunc {
+	type data struct {
+		Error         string
+		Email         string
+		AllowRegister bool
+	}
+	tmpl := parseTemplates("login.html")
+	render := func(w http.ResponseWriter, d data) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, d); err != nil {
+			log.Printf("login render: %v", err)
+		}
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		count, _ := appdb.CountUsers(r.Context(), pool)
+		allowRegister := count == 0
+
+		if r.Method == http.MethodGet {
+			render(w, data{AllowRegister: allowRegister})
+			return
+		}
+
+		email := strings.TrimSpace(r.FormValue("email"))
+		password := r.FormValue("password")
+
+		user, err := appdb.GetUserByEmail(r.Context(), pool, email)
+		if err != nil || !user.IsActive {
+			render(w, data{Error: "Credenciales incorrectas", Email: email, AllowRegister: allowRegister})
+			return
+		}
+		if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
+			render(w, data{Error: "Credenciales incorrectas", Email: email, AllowRegister: allowRegister})
+			return
+		}
+
+		token, err := appdb.CreateSession(r.Context(), pool, user.ID)
+		if err != nil {
+			http.Error(w, "Error interno", http.StatusInternalServerError)
+			return
+		}
+		setSessionCookie(w, token)
+		http.Redirect(w, r, "/dashboard", http.StatusFound)
+	}
 }
 
-// ─── Templates ────────────────────────────────────────────────────────────────
+// ─── Logout ───────────────────────────────────────────────────────────────────
 
-var loginTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <title>Sesame Bot — Login</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #f5f5f7;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      margin: 0;
-      padding: 1rem;
-      color: #1d1d1f;
-    }
-    .card {
-      background: #fff;
-      border-radius: 16px;
-      padding: 2.5rem 2rem;
-      width: 100%;
-      max-width: 380px;
-      box-shadow: 0 2px 20px rgba(0,0,0,.07);
-    }
-    h2 {
-      font-size: 1.4rem;
-      font-weight: 600;
-      margin: 0 0 1.75rem;
-      letter-spacing: -.02em;
-      color: #1d1d1f;
-    }
-    label {
-      display: block;
-      font-size: .8rem;
-      font-weight: 500;
-      color: #6e6e73;
-      text-transform: uppercase;
-      letter-spacing: .05em;
-      margin-top: 1.25rem;
-    }
-    .pw-wrap {
-      position: relative;
-      margin-top: .4rem;
-    }
-    input[type=password], input[type=text].pw-field {
-      width: 100%;
-      padding: .65rem 2.8rem .65rem .85rem;
-      border: 1.5px solid #e0e0e5;
-      border-radius: 10px;
-      font-size: 1rem;
-      color: #1d1d1f;
-      background: #fafafa;
-      outline: none;
-      transition: border-color .15s, box-shadow .15s;
-    }
-    input[type=password]:focus, input[type=text].pw-field:focus {
-      border-color: #0071e3;
-      box-shadow: 0 0 0 3px rgba(0,113,227,.12);
-      background: #fff;
-    }
-    .pw-toggle {
-      position: absolute;
-      right: .65rem;
-      top: 50%;
-      transform: translateY(-50%);
-      background: none;
-      border: none;
-      margin: 0;
-      padding: .25rem;
-      width: auto;
-      cursor: pointer;
-      color: #aeaeb2;
-      display: flex;
-      align-items: center;
-      transition: color .15s;
-    }
-    .pw-toggle:hover { color: #1d1d1f; background: none; }
-    .pw-toggle:active { transform: translateY(-50%) scale(.9); }
-    button[type=submit] {
-      width: 100%;
-      margin-top: 1.5rem;
-      padding: .7rem;
-      border: none;
-      border-radius: 10px;
-      background: #0071e3;
-      color: #fff;
-      font-size: 1rem;
-      font-weight: 500;
-      cursor: pointer;
-      transition: background .15s, transform .1s;
-    }
-    button[type=submit]:hover { background: #0077ed; }
-    button[type=submit]:active { transform: scale(.98); }
-    .error {
-      display: flex;
-      align-items: center;
-      gap: .45rem;
-      margin-top: 1rem;
-      padding: .6rem .8rem;
-      border-radius: 8px;
-      background: #fff2f2;
-      color: #c0392b;
-      font-size: .875rem;
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h2>Sesame Bot</h2>
-    <form method="POST" action="/login">
-      <label>Contraseña de administrador</label>
-      <div class="pw-wrap">
-        <input id="pw" type="password" name="password" class="pw-field" autofocus required>
-        <button type="button" class="pw-toggle" onclick="togglePw()" aria-label="Mostrar contraseña">
-          <svg id="icon-show" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
-          </svg>
-          <svg id="icon-hide" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
-            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>
-          </svg>
-        </button>
-      </div>
-      {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
-      <button type="submit">Entrar</button>
-    </form>
-  </div>
-  <script>
-    function togglePw() {
-      var inp = document.getElementById('pw');
-      var show = document.getElementById('icon-show');
-      var hide = document.getElementById('icon-hide');
-      if (inp.type === 'password') {
-        inp.type = 'text';
-        show.style.display = 'none';
-        hide.style.display = '';
-      } else {
-        inp.type = 'password';
-        show.style.display = '';
-        hide.style.display = 'none';
-      }
-    }
-  </script>
-</body>
-</html>`))
-
-type loginData struct {
-	Error string
+func handleLogout(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if cookie, err := r.Cookie(cookieName); err == nil {
+			_ = appdb.DeleteSession(r.Context(), pool, cookie.Value)
+		}
+		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}
 }
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+
+func handleDashboard(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFunc {
+	type data struct {
+		User            *models.User
+		Config          *models.UserConfig
+		HasPassword     bool
+		PasswordInMemory bool
+		Logs            []models.CheckinLog
+	}
+	tmpl := parseTemplates("dashboard.html")
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+		cfg, err := appdb.GetUserConfig(r.Context(), pool, user.ID)
+		if err != nil {
+			cfg = &models.UserConfig{}
+		}
+
+		_, inMemory := sched.MemPasswords.Load(user.ID)
+		hasPassword := inMemory || cfg.SesamePasswordEnc != ""
+
+		logs, _ := appdb.GetUserLogs(r.Context(), pool, user.ID, 5, 0)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, data{
+			User:             user,
+			Config:           cfg,
+			HasPassword:      hasPassword,
+			PasswordInMemory: inMemory,
+			Logs:             logs,
+		}); err != nil {
+			log.Printf("dashboard render: %v", err)
+		}
+	}
+}
+
+// ─── Config ───────────────────────────────────────────────────────────────────
 
 type dayOption struct {
 	Name     string
 	Selected bool
 }
 
-type configData struct {
-	HoursIn        string
-	HoursOut       string
-	Weekend        bool
-	WeekendFalse   bool
-	LocationOffice string
-	LocationHome   string
-	AllDays        []dayOption
-	Success        bool
-	Error          string
+func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFunc {
+	type data struct {
+		User           *models.User
+		Cfg            *models.UserConfig
+		LocationOffice string
+		LocationHome   string
+		AllDays        []dayOption
+		Success        bool
+		Error          string
+		PwSuccess      bool
+		PwError        string
+		PwMode         string
+	}
+
+	tmpl := parseTemplates("config.html")
+
+	buildData := func(r *http.Request, user *models.User, success bool, errMsg string, pwSuccess bool, pwErr string) data {
+		cfg, _ := appdb.GetUserConfig(r.Context(), pool, user.ID)
+		if cfg == nil {
+			cfg = &models.UserConfig{}
+		}
+
+		officeDaysMap := parseOfficeDays(cfg.OfficeDays)
+		var allDays []dayOption
+		for _, wd := range []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday, time.Saturday, time.Sunday} {
+			allDays = append(allDays, dayOption{
+				Name:     titleCase(dayNames[wd]),
+				Selected: officeDaysMap[wd],
+			})
+		}
+
+		pwMode := "db"
+		if _, inMem := sched.MemPasswords.Load(user.ID); inMem {
+			pwMode = "memory"
+		}
+
+		return data{
+			User:           user,
+			Cfg:            cfg,
+			LocationOffice: locationToStr(cfg.LocationOfficeLat, cfg.LocationOfficeLon),
+			LocationHome:   locationToStr(cfg.LocationHomeLat, cfg.LocationHomeLon),
+			AllDays:        allDays,
+			Success:        success,
+			Error:          errMsg,
+			PwSuccess:      pwSuccess,
+			PwError:        pwErr,
+			PwMode:         pwMode,
+		}
+	}
+
+	render := func(w http.ResponseWriter, d data) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, d); err != nil {
+			log.Printf("config render: %v", err)
+		}
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+
+		if r.Method == http.MethodGet {
+			render(w, buildData(r, user, false, "", false, ""))
+			return
+		}
+
+		if err := r.ParseForm(); err != nil {
+			render(w, buildData(r, user, false, "Error al parsear el formulario", false, ""))
+			return
+		}
+
+		sesameEmail := strings.TrimSpace(r.FormValue("sesame_email"))
+		hoursIn := strings.TrimSpace(r.FormValue("hours_in"))
+		hoursOut := strings.TrimSpace(r.FormValue("hours_out"))
+		weekendVal := r.FormValue("weekend")
+		locOfficeRaw := strings.TrimSpace(r.FormValue("location_office"))
+		locHomeRaw := strings.TrimSpace(r.FormValue("location_home"))
+		officeDaysSelected := r.Form["office_days"]
+
+		if sesameEmail == "" {
+			render(w, buildData(r, user, false, "El email de Sesame es obligatorio", false, ""))
+			return
+		}
+		for _, t := range splitTimes(hoursIn) {
+			if _, err := parseTime(t, actionIn); err != nil {
+				render(w, buildData(r, user, false, "HOURS_IN inválido: "+err.Error(), false, ""))
+				return
+			}
+		}
+		if len(splitTimes(hoursIn)) == 0 {
+			render(w, buildData(r, user, false, "El horario de entrada es obligatorio", false, ""))
+			return
+		}
+		for _, t := range splitTimes(hoursOut) {
+			if _, err := parseTime(t, actionOut); err != nil {
+				render(w, buildData(r, user, false, "HOURS_OUT inválido: "+err.Error(), false, ""))
+				return
+			}
+		}
+		if len(splitTimes(hoursOut)) == 0 {
+			render(w, buildData(r, user, false, "El horario de salida es obligatorio", false, ""))
+			return
+		}
+
+		locOffice, err := parseLocation(locOfficeRaw)
+		if err != nil {
+			render(w, buildData(r, user, false, "Ubicación oficina inválida: "+err.Error(), false, ""))
+			return
+		}
+		locHome, err := parseLocation(locHomeRaw)
+		if err != nil {
+			render(w, buildData(r, user, false, "Ubicación casa inválida: "+err.Error(), false, ""))
+			return
+		}
+
+		weekend := weekendVal == "true"
+		officeDaysStr := strings.Join(officeDaysSelected, ",")
+
+		// Preserve existing password enc
+		existingCfg, _ := appdb.GetUserConfig(r.Context(), pool, user.ID)
+		pwEnc := ""
+		if existingCfg != nil {
+			pwEnc = existingCfg.SesamePasswordEnc
+		}
+
+		cfg := &models.UserConfig{
+			UserID:            user.ID,
+			SesameEmail:       sesameEmail,
+			SesamePasswordEnc: pwEnc,
+			Headless:          true,
+			Weekend:           weekend,
+			HoursIn:           hoursIn,
+			HoursOut:          hoursOut,
+			LocationOfficeLat: locOffice.lat,
+			LocationOfficeLon: locOffice.lon,
+			LocationHomeLat:   locHome.lat,
+			LocationHomeLon:   locHome.lon,
+			OfficeDays:        officeDaysStr,
+		}
+
+		if err := appdb.UpsertUserConfig(r.Context(), pool, cfg); err != nil {
+			render(w, buildData(r, user, false, "Error guardando la configuración: "+err.Error(), false, ""))
+			return
+		}
+
+		log.Printf("Config actualizada para usuario %s", user.ID)
+		render(w, buildData(r, user, true, "", false, ""))
+	}
 }
 
-var configTmpl = template.Must(template.New("config").Parse(`<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <title>Sesame Bot — Configuración</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #f5f5f7;
-      min-height: 100vh;
-      margin: 0;
-      padding: 2rem 1rem;
-      color: #1d1d1f;
-    }
-    .card {
-      background: #fff;
-      border-radius: 18px;
-      padding: 2.5rem 2.25rem;
-      width: 100%;
-      max-width: 560px;
-      margin: 0 auto;
-      box-shadow: 0 2px 24px rgba(0,0,0,.07);
-    }
-    h2 {
-      font-size: 1.4rem;
-      font-weight: 600;
-      margin: 0 0 1.5rem;
-      letter-spacing: -.02em;
-    }
-    label {
-      display: block;
-      font-size: .78rem;
-      font-weight: 500;
-      color: #6e6e73;
-      text-transform: uppercase;
-      letter-spacing: .055em;
-      margin-top: 1.4rem;
-    }
-    .hint {
-      font-size: .8em;
-      color: #aeaeb2;
-      font-weight: 400;
-      text-transform: none;
-      letter-spacing: 0;
-    }
-    input[type=text], select {
-      width: 100%;
-      padding: .65rem .85rem;
-      margin-top: .4rem;
-      border: 1.5px solid #e0e0e5;
-      border-radius: 10px;
-      font-size: .95rem;
-      color: #1d1d1f;
-      background: #fafafa;
-      outline: none;
-      transition: border-color .15s, box-shadow .15s;
-      font-family: inherit;
-    }
-    input[type=text]:focus, select:focus {
-      border-color: #0071e3;
-      box-shadow: 0 0 0 3px rgba(0,113,227,.12);
-      background: #fff;
-    }
-    select[multiple] {
-      padding: .5rem .85rem;
-      line-height: 1.8;
-    }
-    .flash-ok {
-      display: flex;
-      align-items: center;
-      gap: .5rem;
-      padding: .7rem 1rem;
-      border-radius: 10px;
-      background: #f0faf4;
-      color: #1a7f4b;
-      font-size: .875rem;
-      margin-bottom: 1.25rem;
-    }
-    .flash-err {
-      display: flex;
-      align-items: center;
-      gap: .5rem;
-      padding: .7rem 1rem;
-      border-radius: 10px;
-      background: #fff2f2;
-      color: #c0392b;
-      font-size: .875rem;
-      margin-bottom: 1.25rem;
-    }
-    .actions {
-      margin-top: 2rem;
-      display: flex;
-      align-items: center;
-      gap: 1.25rem;
-    }
-    button {
-      padding: .65rem 2.2rem;
-      border: none;
-      border-radius: 10px;
-      background: #0071e3;
-      color: #fff;
-      font-size: .95rem;
-      font-weight: 500;
-      cursor: pointer;
-      transition: background .15s, transform .1s;
-      font-family: inherit;
-    }
-    button:hover { background: #0077ed; }
-    button:active { transform: scale(.98); }
-    a.logout {
-      font-size: .875rem;
-      color: #aeaeb2;
-      text-decoration: none;
-      transition: color .15s;
-    }
-    a.logout:hover { color: #6e6e73; }
-  </style>
-</head>
-<body>
-  <div class="card">
-  <h2>Configuración del scheduler</h2>
-  {{if .Success}}<div class="flash-ok">Configuración guardada correctamente.</div>{{end}}
-  {{if .Error}}<div class="flash-err">{{.Error}}</div>{{end}}
+// ─── Config password ──────────────────────────────────────────────────────────
 
-  <form method="POST" action="/config">
+func handleConfigPassword(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFunc {
+	type data struct {
+		User      *models.User
+		PwSuccess bool
+		PwError   string
+	}
+	tmpl := parseTemplates("config.html")
+	_ = tmpl
 
-    <label>HOURS_IN <span class="hint">(ej: 09:00 o 09:00,14:00)</span>
-      <input type="text" name="hours_in" value="{{.HoursIn}}" required>
-    </label>
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Error al parsear formulario", http.StatusBadRequest)
+			return
+		}
 
-    <label>HOURS_OUT <span class="hint">(ej: 18:00 o 13:00,18:00)</span>
-      <input type="text" name="hours_out" value="{{.HoursOut}}" required>
-    </label>
+		mode := r.FormValue("pw_mode")
+		password := r.FormValue("sesame_password")
 
-    <label>WEEKEND — ejecutar en fin de semana
-      <select name="weekend">
-        <option value="true"{{if .Weekend}} selected{{end}}>Sí (true)</option>
-        <option value="false"{{if .WeekendFalse}} selected{{end}}>No (false)</option>
-      </select>
-    </label>
+		switch mode {
+		case "clear":
+			sched.MemPasswords.Delete(user.ID)
+			if err := appdb.ClearSesamePassword(r.Context(), pool, user.ID); err != nil {
+				log.Printf("handleConfigPassword: error borrando pw: %v", err)
+			}
+		case "memory":
+			if password == "" {
+				http.Redirect(w, r, "/config?pw_error=La+contrase%C3%B1a+no+puede+estar+vac%C3%ADa", http.StatusFound)
+				return
+			}
+			sched.MemPasswords.Store(user.ID, password)
+			// Clear any DB-stored version
+			_ = appdb.ClearSesamePassword(r.Context(), pool, user.ID)
+		case "db":
+			if password == "" {
+				http.Redirect(w, r, "/config?pw_error=La+contrase%C3%B1a+no+puede+estar+vac%C3%ADa", http.StatusFound)
+				return
+			}
+			encKey, err := appcrypto.LoadKey()
+			if err != nil || len(encKey) == 0 {
+				http.Redirect(w, r, "/config?pw_error=ENCRYPTION_KEY+no+configurada+en+el+servidor", http.StatusFound)
+				return
+			}
+			enc, err := appcrypto.Encrypt(encKey, password)
+			if err != nil {
+				http.Redirect(w, r, "/config?pw_error=Error+cifrando+la+contrase%C3%B1a", http.StatusFound)
+				return
+			}
+			if err := appdb.UpdateSesamePassword(r.Context(), pool, user.ID, enc); err != nil {
+				log.Printf("handleConfigPassword: error guardando pw cifrada: %v", err)
+				http.Redirect(w, r, "/config?pw_error=Error+guardando+la+contrase%C3%B1a", http.StatusFound)
+				return
+			}
+			// Remove from memory if it was there
+			sched.MemPasswords.Delete(user.ID)
+		}
 
-    <label>LOCATION_OFFICE <span class="hint">(latitud,longitud)</span>
-      <input type="text" name="location_office" value="{{.LocationOffice}}">
-    </label>
+		http.Redirect(w, r, "/config?pw_success=1", http.StatusFound)
+	}
+}
 
-    <label>LOCATION_HOME <span class="hint">(latitud,longitud)</span>
-      <input type="text" name="location_home" value="{{.LocationHome}}">
-    </label>
+// ─── Logs ─────────────────────────────────────────────────────────────────────
 
-    <label>OFFICE_DAYS <span class="hint">(Ctrl/Cmd+click para selección múltiple)</span>
-      <select name="office_days" multiple size="7">
-        {{range .AllDays}}
-        <option value="{{.Name}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>
-        {{end}}
-      </select>
-    </label>
+func handleLogs(pool *pgxpool.Pool) http.HandlerFunc {
+	const pageSize = 25
 
-    <div class="actions">
-      <button type="submit">Guardar</button>
-      <a class="logout" href="/logout">Cerrar sesión</a>
-    </div>
-  </form>
-  </div>
-</body>
-</html>`))
+	type data struct {
+		User       *models.User
+		Logs       []models.CheckinLog
+		HasMore    bool
+		NextOffset int
+	}
+	tmpl := parseTemplates("logs.html")
+	rowsTmpl := template.Must(template.New("rows").Parse(`
+{{range .}}
+<tr>
+  <td>{{.ExecutedAt.Format "02/01/2006 15:04:05"}}</td>
+  <td><strong>{{.Action}}</strong></td>
+  <td>
+    {{if eq .Status "ok"}}<span class="badge badge-ok">OK</span>
+    {{else if eq .Status "error"}}<span class="badge badge-err">Error</span>
+    {{else}}<span class="badge badge-skip">Omitido</span>{{end}}
+  </td>
+  <td style="color:#6e6e73;font-size:.825rem">{{.Message}}</td>
+</tr>
+{{end}}`))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+		offsetStr := r.URL.Query().Get("offset")
+		offset, _ := strconv.Atoi(offsetStr)
+
+		logs, _ := appdb.GetUserLogs(r.Context(), pool, user.ID, pageSize+1, offset)
+		hasMore := len(logs) > pageSize
+		if hasMore {
+			logs = logs[:pageSize]
+		}
+
+		// HTMX partial: return only rows
+		if r.Header.Get("HX-Request") == "true" && offset > 0 {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_ = rowsTmpl.Execute(w, logs)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, data{
+			User:       user,
+			Logs:       logs,
+			HasMore:    hasMore,
+			NextOffset: offset + pageSize,
+		}); err != nil {
+			log.Printf("logs render: %v", err)
+		}
+	}
+}
+
+// ─── Admin ────────────────────────────────────────────────────────────────────
+
+func handleAdmin(pool *pgxpool.Pool) http.HandlerFunc {
+	type data struct {
+		User       *models.User
+		Users      []models.User
+		RecentLogs []models.CheckinLog
+		Success    string
+	}
+	tmpl := parseTemplates("admin.html")
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+		users, _ := appdb.ListUsers(r.Context(), pool)
+		recentLogs, _ := appdb.GetAllUsersRecentLogs(r.Context(), pool, 20)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, data{
+			User:       user,
+			Users:      users,
+			RecentLogs: recentLogs,
+		}); err != nil {
+			log.Printf("admin render: %v", err)
+		}
+	}
+}
+
+func handleAdminToggleUser(pool *pgxpool.Pool) http.HandlerFunc {
+	type rowData struct {
+		models.User
+	}
+	rowTmpl := template.Must(template.New("row").Parse(`
+<tr id="user-{{.ID}}">
+  <td>{{.Email}}</td>
+  <td>{{if .IsAdmin}}<span class="badge badge-ok">Admin</span>{{else}}Usuario{{end}}</td>
+  <td>
+    {{if .IsActive}}<span class="badge badge-active">Activo</span>
+    {{else}}<span class="badge badge-inactive">Inactivo</span>{{end}}
+  </td>
+  <td style="color:#6e6e73;font-size:.825rem">{{.CreatedAt.Format "02/01/2006"}}</td>
+  <td>
+    <button class="btn btn-ghost btn-sm"
+      hx-post="/admin/users/{{.ID}}/toggle"
+      hx-target="#user-{{.ID}}"
+      hx-swap="outerHTML">
+      {{if .IsActive}}Desactivar{{else}}Activar{{end}}
+    </button>
+    <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
+  </td>
+</tr>`))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Extract user ID from path: /admin/users/{id}/toggle
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) < 4 {
+			http.Error(w, "ID inválido", http.StatusBadRequest)
+			return
+		}
+		targetID := parts[3]
+
+		if err := appdb.ToggleUserActive(r.Context(), pool, targetID); err != nil {
+			http.Error(w, "Error actualizando usuario", http.StatusInternalServerError)
+			return
+		}
+		user, err := appdb.GetUserByID(r.Context(), pool, targetID)
+		if err != nil {
+			http.Error(w, "Usuario no encontrado", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = rowTmpl.Execute(w, user)
+	}
+}
+
+func handleAdminUserLogs(pool *pgxpool.Pool) http.HandlerFunc {
+	type data struct {
+		User       *models.User
+		TargetUser *models.User
+		Logs       []models.CheckinLog
+	}
+	tmpl := parseTemplates("admin_user_logs.html")
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		// /admin/users/{id}/logs
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) < 4 {
+			http.Error(w, "ID inválido", http.StatusBadRequest)
+			return
+		}
+		targetID := parts[3]
+
+		user := currentUser(r)
+		targetUser, err := appdb.GetUserByID(r.Context(), pool, targetID)
+		if err != nil {
+			http.Error(w, "Usuario no encontrado", http.StatusNotFound)
+			return
+		}
+		logs, _ := appdb.GetUserLogs(r.Context(), pool, targetID, 50, 0)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, data{User: user, TargetUser: targetUser, Logs: logs}); err != nil {
+			log.Printf("admin user logs render: %v", err)
+		}
+	}
+}
+
+// ─── Server ───────────────────────────────────────────────────────────────────
+
+func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
+	port := os.Getenv("ADMIN_PORT")
+	if port == "" {
+		port = defaultPort
+	}
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/register", handleRegister(pool))
+	mux.HandleFunc("/login", handleLogin(pool))
+	mux.HandleFunc("/logout", handleLogout(pool))
+
+	mux.HandleFunc("/dashboard", requireAuth(pool, handleDashboard(pool, sched)))
+	mux.HandleFunc("/config", requireAuth(pool, handleConfig(pool, sched)))
+	mux.HandleFunc("/config/password", requireAuth(pool, handleConfigPassword(pool, sched)))
+	mux.HandleFunc("/logs", requireAuth(pool, handleLogs(pool)))
+
+	mux.HandleFunc("/admin", requireAdmin(pool, handleAdmin(pool)))
+	mux.HandleFunc("/admin/users/", requireAdmin(pool, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/toggle") {
+			handleAdminToggleUser(pool)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/logs") {
+			handleAdminUserLogs(pool)(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Redirect(w, r, "/dashboard", http.StatusFound)
+	})
+
+	// Periodically clean expired sessions
+	go func() {
+		for {
+			time.Sleep(1 * time.Hour)
+			_ = appdb.CleanExpiredSessions(context.Background(), pool)
+		}
+	}()
+
+	log.Printf("Servidor web disponible en http://localhost:%s", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		log.Printf("Error en servidor web: %v", err)
+	}
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-var weekdayOrder = []time.Weekday{
-	time.Monday, time.Tuesday, time.Wednesday, time.Thursday,
-	time.Friday, time.Saturday, time.Sunday,
+func setSessionCookie(w http.ResponseWriter, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   86400,
+	})
 }
 
-func formatFloat(f float64) string {
-	return strconv.FormatFloat(f, 'f', -1, 64)
-}
-
-func locationToString(loc location) string {
-	if loc.lat == 0 && loc.lon == 0 {
+func locationToStr(lat, lon float64) string {
+	if lat == 0 && lon == 0 {
 		return ""
 	}
-	return formatFloat(loc.lat) + "," + formatFloat(loc.lon)
+	return strconv.FormatFloat(lat, 'f', -1, 64) + "," + strconv.FormatFloat(lon, 'f', -1, 64)
 }
 
 func titleCase(s string) string {
@@ -446,293 +697,5 @@ func titleCase(s string) string {
 	return strings.ToUpper(s[:1]) + strings.ToLower(s[1:])
 }
 
-func configToData(cfg config, success bool, errMsg string) configData {
-	days := make([]dayOption, len(weekdayOrder))
-	for i, wd := range weekdayOrder {
-		days[i] = dayOption{
-			Name:     titleCase(dayNames[wd]),
-			Selected: cfg.officeDays[wd],
-		}
-	}
-
-	return configData{
-		HoursIn:        strings.Join(cfg.hoursIn, ","),
-		HoursOut:       strings.Join(cfg.hoursOut, ","),
-		Weekend:        cfg.weekend,
-		WeekendFalse:   !cfg.weekend,
-		LocationOffice: locationToString(cfg.locationOffice),
-		LocationHome:   locationToString(cfg.locationHome),
-		AllDays:        days,
-		Success:        success,
-		Error:          errMsg,
-	}
-}
-
-// ─── .env file update ────────────────────────────────────────────────────────
-
-func updateDotEnv(path string, changes map[string]string) error {
-	var lines []string
-
-	f, err := os.Open(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err == nil {
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			lines = append(lines, scanner.Text())
-		}
-		f.Close()
-		if err := scanner.Err(); err != nil {
-			return err
-		}
-	}
-
-	written := make(map[string]bool)
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") || trimmed == "" {
-			continue
-		}
-		parts := strings.SplitN(trimmed, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		if newVal, ok := changes[key]; ok {
-			lines[i] = key + "=" + newVal
-			written[key] = true
-		}
-	}
-
-	for key, val := range changes {
-		if !written[key] {
-			lines = append(lines, key+"="+val)
-		}
-	}
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")+"\n"), 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// ─── Auth middleware ──────────────────────────────────────────────────────────
-
-func authMiddleware(store *sessionStore, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(cookieName)
-		if err != nil || !store.validate(cookie.Value) {
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
-		}
-		next(w, r)
-	}
-}
-
-// ─── Handlers ────────────────────────────────────────────────────────────────
-
-func handleLoginGET(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := loginTmpl.Execute(w, loginData{}); err != nil {
-		log.Printf("error renderizando login: %v", err)
-	}
-}
-
-func handleLoginPOST(w http.ResponseWriter, r *http.Request, store *sessionStore) {
-	adminPassword := os.Getenv("ADMIN_PASSWORD")
-	if adminPassword == "" {
-		http.Error(w, "ADMIN_PASSWORD no configurado en el servidor", http.StatusInternalServerError)
-		return
-	}
-
-	input := r.FormValue("password")
-	if subtle.ConstantTimeCompare([]byte(input), []byte(adminPassword)) != 1 {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := loginTmpl.Execute(w, loginData{Error: "Contraseña incorrecta"}); err != nil {
-			log.Printf("error renderizando login: %v", err)
-		}
-		return
-	}
-
-	token, err := store.create()
-	if err != nil {
-		http.Error(w, "Error interno al crear sesión", http.StatusInternalServerError)
-		return
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     cookieName,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(sessionTTL.Seconds()),
-	})
-	http.Redirect(w, r, "/config", http.StatusFound)
-}
-
-func handleLogout(w http.ResponseWriter, r *http.Request, store *sessionStore) {
-	if cookie, err := r.Cookie(cookieName); err == nil {
-		store.revoke(cookie.Value)
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     cookieName,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		MaxAge:   -1,
-	})
-	http.Redirect(w, r, "/login", http.StatusFound)
-}
-
-func handleConfigGET(w http.ResponseWriter, r *http.Request, holder *configHolder) {
-	data := configToData(holder.get(), false, "")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := configTmpl.Execute(w, data); err != nil {
-		log.Printf("error renderizando config: %v", err)
-	}
-}
-
-func handleConfigPOST(w http.ResponseWriter, r *http.Request, holder *configHolder) {
-	if err := r.ParseForm(); err != nil {
-		renderConfigError(w, holder, "Error al parsear el formulario")
-		return
-	}
-
-	hoursIn := strings.TrimSpace(r.FormValue("hours_in"))
-	hoursOut := strings.TrimSpace(r.FormValue("hours_out"))
-	weekendVal := r.FormValue("weekend")
-	locOfficeRaw := strings.TrimSpace(r.FormValue("location_office"))
-	locHomeRaw := strings.TrimSpace(r.FormValue("location_home"))
-	officeDaysSelected := r.Form["office_days"]
-
-	// Validar HOURS_IN
-	parsedIn := splitTimes(hoursIn)
-	for _, t := range parsedIn {
-		if _, err := parseTime(t, actionIn); err != nil {
-			renderConfigError(w, holder, fmt.Sprintf("HOURS_IN inválido (%q): %v", t, err))
-			return
-		}
-	}
-	if len(parsedIn) == 0 {
-		renderConfigError(w, holder, "HOURS_IN no puede estar vacío")
-		return
-	}
-
-	// Validar HOURS_OUT
-	parsedOut := splitTimes(hoursOut)
-	for _, t := range parsedOut {
-		if _, err := parseTime(t, actionOut); err != nil {
-			renderConfigError(w, holder, fmt.Sprintf("HOURS_OUT inválido (%q): %v", t, err))
-			return
-		}
-	}
-	if len(parsedOut) == 0 {
-		renderConfigError(w, holder, "HOURS_OUT no puede estar vacío")
-		return
-	}
-
-	// Validar localizaciones
-	if _, err := parseLocation(locOfficeRaw); err != nil {
-		renderConfigError(w, holder, fmt.Sprintf("LOCATION_OFFICE inválido: %v", err))
-		return
-	}
-	if _, err := parseLocation(locHomeRaw); err != nil {
-		renderConfigError(w, holder, fmt.Sprintf("LOCATION_HOME inválido: %v", err))
-		return
-	}
-
-	// Construir OFFICE_DAYS string
-	officeDaysStr := strings.Join(officeDaysSelected, ",")
-
-	// Actualizar .env
-	changes := map[string]string{
-		"HOURS_IN":        hoursIn,
-		"HOURS_OUT":       hoursOut,
-		"WEEKEND":         weekendVal,
-		"LOCATION_OFFICE": locOfficeRaw,
-		"LOCATION_HOME":   locHomeRaw,
-		"OFFICE_DAYS":     officeDaysStr,
-	}
-	if err := updateDotEnv(".env", changes); err != nil {
-		log.Printf("error actualizando .env: %v", err)
-	}
-
-	// Actualizar variables de entorno del proceso
-	for k, v := range changes {
-		os.Setenv(k, v)
-	}
-
-	// Recargar config
-	newCfg, err := buildConfig()
-	if err != nil {
-		renderConfigError(w, holder, fmt.Sprintf("Error en la nueva configuración: %v", err))
-		return
-	}
-	holder.set(newCfg)
-	log.Println("Configuración actualizada desde la UI web")
-
-	data := configToData(newCfg, true, "")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := configTmpl.Execute(w, data); err != nil {
-		log.Printf("error renderizando config: %v", err)
-	}
-}
-
-func renderConfigError(w http.ResponseWriter, holder *configHolder, msg string) {
-	data := configToData(holder.get(), false, msg)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusBadRequest)
-	if err := configTmpl.Execute(w, data); err != nil {
-		log.Printf("error renderizando config: %v", err)
-	}
-}
-
-// ─── Server ───────────────────────────────────────────────────────────────────
-
-func startWebServer(holder *configHolder) {
-	port := os.Getenv("ADMIN_PORT")
-	if port == "" {
-		port = defaultPort
-	}
-
-	store := newSessionStore()
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			handleLoginGET(w, r)
-		case http.MethodPost:
-			handleLoginPOST(w, r, store)
-		default:
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	mux.HandleFunc("/logout", func(w http.ResponseWriter, r *http.Request) {
-		handleLogout(w, r, store)
-	})
-
-	mux.HandleFunc("/config", authMiddleware(store, func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			handleConfigGET(w, r, holder)
-		case http.MethodPost:
-			handleConfigPOST(w, r, holder)
-		default:
-			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		}
-	}))
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/config", http.StatusFound)
-	})
-
-	log.Printf("Admin UI disponible en http://localhost:%s/login", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Printf("Error en servidor web admin: %v", err)
-	}
-}
+// Ensure pgx and bcrypt imports are used (suppress unused import errors)
+var _ = pgx.ErrNoRows

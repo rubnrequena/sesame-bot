@@ -1,0 +1,54 @@
+{{template "base.html" .}}
+{{define "title"}}Sesame Bot — Historial{{end}}
+{{define "nav"}}
+<nav>
+  <a href="/" class="brand">Sesame Bot</a>
+  <a href="/dashboard">Dashboard</a>
+  <a href="/config">Configuración</a>
+  <a href="/logs">Historial</a>
+  {{if .User.IsAdmin}}<a href="/admin">Admin</a>{{end}}
+  <span class="spacer"></span>
+  <span style="font-size:.8rem;color:#aeaeb2">{{.User.Email}}</span>
+  <form method="POST" action="/logout" style="display:inline">
+    <button type="submit" class="btn btn-ghost btn-sm">Salir</button>
+  </form>
+</nav>
+{{end}}
+{{define "content"}}
+<div class="card">
+  <h1>Historial de fichajes</h1>
+  {{if .Logs}}
+  <table>
+    <thead><tr><th>Fecha/Hora</th><th>Acción</th><th>Estado</th><th>Detalle</th></tr></thead>
+    <tbody id="log-rows">
+    {{range .Logs}}
+    <tr>
+      <td>{{.ExecutedAt.Format "02/01/2006 15:04:05"}}</td>
+      <td><strong>{{.Action}}</strong></td>
+      <td>
+        {{if eq .Status "ok"}}<span class="badge badge-ok">OK</span>
+        {{else if eq .Status "error"}}<span class="badge badge-err">Error</span>
+        {{else}}<span class="badge badge-skip">Omitido</span>{{end}}
+      </td>
+      <td style="color:#6e6e73;font-size:.825rem">{{.Message}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{if .HasMore}}
+  <div style="margin-top:1rem;text-align:center">
+    <button class="btn btn-ghost btn-sm"
+      hx-get="/logs?offset={{.NextOffset}}"
+      hx-target="#log-rows"
+      hx-swap="beforeend"
+      hx-indicator="#loading">
+      Cargar más
+    </button>
+    <span id="loading" class="htmx-indicator" style="font-size:.825rem;color:#aeaeb2;margin-left:.75rem">Cargando...</span>
+  </div>
+  {{end}}
+  {{else}}
+  <p style="color:#aeaeb2;font-size:.875rem">Sin fichajes registrados aún.</p>
+  {{end}}
+</div>
+{{end}}

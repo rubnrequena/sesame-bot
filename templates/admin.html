@@ -1,0 +1,77 @@
+{{template "base.html" .}}
+{{define "title"}}Sesame Bot — Admin{{end}}
+{{define "nav"}}
+<nav>
+  <a href="/" class="brand">Sesame Bot</a>
+  <a href="/dashboard">Dashboard</a>
+  <a href="/config">Configuración</a>
+  <a href="/logs">Historial</a>
+  <a href="/admin">Admin</a>
+  <span class="spacer"></span>
+  <span style="font-size:.8rem;color:#aeaeb2">{{.User.Email}}</span>
+  <form method="POST" action="/logout" style="display:inline">
+    <button type="submit" class="btn btn-ghost btn-sm">Salir</button>
+  </form>
+</nav>
+{{end}}
+{{define "content"}}
+<div class="card">
+  <h1>Panel de administración</h1>
+  {{if .Success}}<div class="flash-ok">{{.Success}}</div>{{end}}
+
+  <h2>Usuarios ({{len .Users}})</h2>
+  {{if .Users}}
+  <table>
+    <thead><tr><th>Email</th><th>Rol</th><th>Estado</th><th>Registro</th><th>Acciones</th></tr></thead>
+    <tbody>
+    {{range .Users}}
+    <tr id="user-{{.ID}}">
+      <td>{{.Email}}</td>
+      <td>{{if .IsAdmin}}<span class="badge badge-ok">Admin</span>{{else}}Usuario{{end}}</td>
+      <td>
+        {{if .IsActive}}<span class="badge badge-active">Activo</span>
+        {{else}}<span class="badge badge-inactive">Inactivo</span>{{end}}
+      </td>
+      <td style="color:#6e6e73;font-size:.825rem">{{.CreatedAt.Format "02/01/2006"}}</td>
+      <td>
+        <button class="btn btn-ghost btn-sm"
+          hx-post="/admin/users/{{.ID}}/toggle"
+          hx-target="#user-{{.ID}}"
+          hx-swap="outerHTML">
+          {{if .IsActive}}Desactivar{{else}}Activar{{end}}
+        </button>
+        <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p style="color:#aeaeb2;font-size:.875rem">No hay usuarios registrados.</p>
+  {{end}}
+
+  <hr class="section-divider">
+  <h2>Actividad reciente</h2>
+  {{if .RecentLogs}}
+  <table>
+    <thead><tr><th>Usuario</th><th>Fecha</th><th>Acción</th><th>Estado</th></tr></thead>
+    <tbody>
+    {{range .RecentLogs}}
+    <tr>
+      <td style="font-size:.825rem;color:#6e6e73">{{.UserID}}</td>
+      <td>{{.ExecutedAt.Format "02/01 15:04"}}</td>
+      <td><strong>{{.Action}}</strong></td>
+      <td>
+        {{if eq .Status "ok"}}<span class="badge badge-ok">OK</span>
+        {{else if eq .Status "error"}}<span class="badge badge-err">Error</span>
+        {{else}}<span class="badge badge-skip">Omitido</span>{{end}}
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p style="color:#aeaeb2;font-size:.875rem">Sin actividad reciente.</p>
+  {{end}}
+</div>
+{{end}}

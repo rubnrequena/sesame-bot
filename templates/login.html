@@ -1,0 +1,39 @@
+{{template "base.html" .}}
+{{define "title"}}Sesame Bot — Acceder{{end}}
+{{define "nav"}}{{end}}
+{{define "content"}}
+<div class="card card-sm">
+  <h1>Sesame Bot</h1>
+  {{if .Error}}<div class="flash-err">{{.Error}}</div>{{end}}
+  <form method="POST" action="/login">
+    <label>Correo electrónico
+      <input type="email" name="email" autofocus required value="{{.Email}}">
+    </label>
+    <label>Contraseña</label>
+    <div class="pw-wrap">
+      <input id="pw" type="password" name="password" required>
+      <button type="button" class="pw-toggle" onclick="togglePw('pw','ico-s','ico-h')" aria-label="Mostrar">
+        <svg id="ico-s" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg id="ico-h" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
+    <div class="actions">
+      <button type="submit" class="btn" style="width:100%">Entrar</button>
+    </div>
+  </form>
+  {{if .AllowRegister}}
+  <p style="text-align:center;margin-top:1.25rem;font-size:.875rem;color:#6e6e73">
+    ¿Primera vez? <a href="/register" style="color:#0071e3">Crear cuenta</a>
+  </p>
+  {{end}}
+</div>
+<script>
+function togglePw(id, showId, hideId) {
+  var inp = document.getElementById(id);
+  var show = document.getElementById(showId);
+  var hide = document.getElementById(hideId);
+  if (inp.type === 'password') { inp.type = 'text'; show.style.display='none'; hide.style.display=''; }
+  else { inp.type = 'password'; show.style.display=''; hide.style.display='none'; }
+}
+</script>
+{{end}}

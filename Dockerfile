@@ -7,8 +7,11 @@ WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download
 
-# Código fuente
+# Código fuente y recursos embebidos
 COPY *.go ./
+COPY internal/ ./internal/
+COPY migrations/ ./migrations/
+COPY templates/ ./templates/
 
 # Compilar binario estático
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
@@ -33,8 +36,13 @@ COPY --from=builder /app/sesame-bot .
 # El .env se monta en runtime (ver docker-compose o --env-file)
 # No se copia aquí para no exponer credenciales en la imagen
 
+# Copiar también migraciones (aunque estén embebidas, las buscamos en disco)
+COPY --from=builder /app/migrations ./migrations
+
 # Forzar headless dentro del contenedor (no hay display disponible)
 ENV HEADLESS=true
 ENV TZ=Europe/Madrid
+
+# DATABASE_URL y ENCRYPTION_KEY se pasan en runtime (no se incrustan en la imagen)
 
 CMD ["./sesame-bot"]

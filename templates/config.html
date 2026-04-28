@@ -1,0 +1,112 @@
+{{template "base.html" .}}
+{{define "title"}}Sesame Bot — Configuración{{end}}
+{{define "nav"}}
+<nav>
+  <a href="/" class="brand">Sesame Bot</a>
+  <a href="/dashboard">Dashboard</a>
+  <a href="/config">Configuración</a>
+  <a href="/logs">Historial</a>
+  {{if .User.IsAdmin}}<a href="/admin">Admin</a>{{end}}
+  <span class="spacer"></span>
+  <span style="font-size:.8rem;color:#aeaeb2">{{.User.Email}}</span>
+  <form method="POST" action="/logout" style="display:inline">
+    <button type="submit" class="btn btn-ghost btn-sm">Salir</button>
+  </form>
+</nav>
+{{end}}
+{{define "content"}}
+<div class="card">
+  <h1>Configuración</h1>
+  {{if .Success}}<div class="flash-ok">Configuración guardada correctamente.</div>{{end}}
+  {{if .Error}}<div class="flash-err">{{.Error}}</div>{{end}}
+
+  <form method="POST" action="/config">
+    <h2>Cuenta de Sesame Time</h2>
+    <label>Email de Sesame Time
+      <input type="email" name="sesame_email" value="{{.Cfg.SesameEmail}}" required>
+    </label>
+
+    <label>Horario de entrada <span class="hint">(ej: 09:00 o 09:00,14:00)</span>
+      <input type="text" name="hours_in" value="{{.Cfg.HoursIn}}" required>
+    </label>
+
+    <label>Horario de salida <span class="hint">(ej: 18:00 o 13:00,18:00)</span>
+      <input type="text" name="hours_out" value="{{.Cfg.HoursOut}}" required>
+    </label>
+
+    <label>Ejecutar en fin de semana
+      <select name="weekend">
+        <option value="false"{{if not .Cfg.Weekend}} selected{{end}}>No</option>
+        <option value="true"{{if .Cfg.Weekend}} selected{{end}}>Sí</option>
+      </select>
+    </label>
+
+    <hr class="section-divider">
+    <h2>Geolocalización <span class="hint">(opcional)</span></h2>
+
+    <label>Ubicación oficina <span class="hint">(latitud,longitud)</span>
+      <input type="text" name="location_office" value="{{.LocationOffice}}">
+    </label>
+
+    <label>Ubicación casa <span class="hint">(latitud,longitud)</span>
+      <input type="text" name="location_home" value="{{.LocationHome}}">
+    </label>
+
+    <label>Días en oficina <span class="hint">(Ctrl/Cmd+click para múltiples)</span>
+      <select name="office_days" multiple size="7">
+        {{range .AllDays}}
+        <option value="{{.Name}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>
+        {{end}}
+      </select>
+    </label>
+
+    <div class="actions">
+      <button type="submit" class="btn">Guardar configuración</button>
+    </div>
+  </form>
+
+  <hr class="section-divider">
+  <h2>Contraseña de Sesame Time</h2>
+  {{if .PwSuccess}}<div class="flash-ok">Contraseña actualizada.</div>{{end}}
+  {{if .PwError}}<div class="flash-err">{{.PwError}}</div>{{end}}
+
+  <form method="POST" action="/config/password">
+    <label>Modo de almacenamiento
+      <select name="pw_mode" id="pw_mode" onchange="togglePwHint()">
+        <option value="db"{{if eq .PwMode "db"}} selected{{end}}>Cifrada en base de datos</option>
+        <option value="memory"{{if eq .PwMode "memory"}} selected{{end}}>Solo en memoria (se pierde al reiniciar)</option>
+        <option value="clear">Borrar contraseña guardada</option>
+      </select>
+    </label>
+    <div id="pw_hint_memory" style="display:none;margin-top:.5rem;font-size:.825rem;color:#aeaeb2">
+      La contraseña se almacena solo en RAM. Si el servidor se reinicia, deberás introducirla de nuevo.
+    </div>
+
+    <label>Contraseña de Sesame</label>
+    <div class="pw-wrap">
+      <input id="spw" type="password" name="sesame_password" autocomplete="new-password">
+      <button type="button" class="pw-toggle" onclick="togglePw('spw','sico-s','sico-h')" aria-label="Mostrar">
+        <svg id="sico-s" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg id="sico-h" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
+    <div class="actions">
+      <button type="submit" class="btn">Guardar contraseña</button>
+    </div>
+  </form>
+</div>
+<script>
+function togglePw(id, showId, hideId) {
+  var inp = document.getElementById(id);
+  var show = document.getElementById(showId);
+  var hide = document.getElementById(hideId);
+  if (inp.type === 'password') { inp.type = 'text'; show.style.display='none'; hide.style.display=''; }
+  else { inp.type = 'password'; show.style.display=''; hide.style.display='none'; }
+}
+function togglePwHint() {
+  var mode = document.getElementById('pw_mode').value;
+  document.getElementById('pw_hint_memory').style.display = mode === 'memory' ? 'block' : 'none';
+}
+togglePwHint();
+</script>
+{{end}}
