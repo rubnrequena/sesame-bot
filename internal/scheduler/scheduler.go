@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -12,6 +13,9 @@ import (
 	"sesame-bot/internal/db"
 	"sesame-bot/internal/models"
 )
+
+// ErrSkipped signals that a check-in was intentionally skipped (e.g. public holiday).
+var ErrSkipped = errors.New("skipped")
 
 // These types mirror the ones in main package to build a config value.
 // The actual runAction call happens via the provided ActionFunc.
@@ -113,8 +117,13 @@ func (s *Scheduler) Run(ctx context.Context) {
 						)
 						status, msg := "ok", ""
 						if err != nil {
-							status, msg = "error", err.Error()
-							log.Printf("Scheduler [%s]: error %s: %v", uid, action, err)
+							if errors.Is(err, ErrSkipped) {
+								status, msg = "skipped", err.Error()
+								log.Printf("Scheduler [%s]: %s omitido: %s", uid, action, msg)
+							} else {
+								status, msg = "error", err.Error()
+								log.Printf("Scheduler [%s]: error %s: %v", uid, action, err)
+							}
 						} else {
 							log.Printf("Scheduler [%s]: %s completado", uid, action)
 						}
