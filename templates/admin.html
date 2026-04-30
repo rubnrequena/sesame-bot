@@ -1,7 +1,7 @@
 {{template "base.html" .}}
 {{define "title"}}Sesame Bot — Admin{{end}}
 {{define "nav"}}
-<nav>
+<nav style="max-width:960px">
   <a href="/" class="brand">Sesame Bot</a>
   <a href="/dashboard">Dashboard</a>
   <a href="/config">Configuración</a>
@@ -15,14 +15,14 @@
 </nav>
 {{end}}
 {{define "content"}}
-<div class="card">
+<div class="card card-wide">
   <h1>Panel de administración</h1>
   {{if .Success}}<div class="flash-ok">{{.Success}}</div>{{end}}
 
   <h2>Usuarios ({{len .Users}})</h2>
   {{if .Users}}
   <table>
-    <thead><tr><th>Email</th><th>Rol</th><th>Estado</th><th>Registro</th><th>Acciones</th></tr></thead>
+    <thead><tr><th>Email</th><th>Rol</th><th>Estado</th><th>Aprobación</th><th>Registro</th><th>Acciones</th></tr></thead>
     <tbody>
     {{range .Users}}
     <tr id="user-{{.ID}}">
@@ -32,6 +32,10 @@
         {{if .IsActive}}<span class="badge badge-active">Activo</span>
         {{else}}<span class="badge badge-inactive">Inactivo</span>{{end}}
       </td>
+      <td>
+        {{if .IsApproved}}<span class="badge badge-ok">Aprobado</span>
+        {{else}}<span class="badge badge-skip">Pendiente</span>{{end}}
+      </td>
       <td style="color:#6e6e73;font-size:.825rem">{{.CreatedAt.Format "02/01/2006"}}</td>
       <td>
         <button class="btn btn-ghost btn-sm"
@@ -40,6 +44,14 @@
           hx-swap="outerHTML">
           {{if .IsActive}}Desactivar{{else}}Activar{{end}}
         </button>
+        {{if not .IsApproved}}
+        <button class="btn btn-ghost btn-sm" style="margin-left:.35rem"
+          hx-post="/admin/users/{{.ID}}/approve"
+          hx-target="#user-{{.ID}}"
+          hx-swap="outerHTML">
+          Aprobar
+        </button>
+        {{end}}
         <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
       </td>
     </tr>

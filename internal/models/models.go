@@ -8,6 +8,7 @@ type User struct {
 	PasswordHash string
 	IsAdmin      bool
 	IsActive     bool
+	IsApproved   bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }

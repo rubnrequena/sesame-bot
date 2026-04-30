@@ -81,8 +81,9 @@ func currentUser(r *http.Request) *models.User {
 
 func handleRegister(pool *pgxpool.Pool) http.HandlerFunc {
 	type data struct {
-		Error string
-		Email string
+		Error   string
+		Email   string
+		Pending bool
 	}
 	tmpl := parseTemplates("register.html")
 	render := func(w http.ResponseWriter, d data) {
@@ -93,17 +94,6 @@ func handleRegister(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Only allow registration when no users exist yet
-		count, err := appdb.CountUsers(r.Context(), pool)
-		if err != nil {
-			http.Error(w, "Error interno", http.StatusInternalServerError)
-			return
-		}
-		if count > 0 {
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
-		}
-
 		if r.Method == http.MethodGet {
 			render(w, data{})
 			return
@@ -123,10 +113,24 @@ func handleRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// First user is always admin
-		user, err := appdb.CreateUser(r.Context(), pool, email, string(hash), true)
+		count, err := appdb.CountUsers(r.Context(), pool)
+		if err != nil {
+			http.Error(w, "Error interno", http.StatusInternalServerError)
+			return
+		}
+
+		// First user becomes admin and is auto-approved; subsequent users need approval
+		isAdmin := count == 0
+		isApproved := count == 0
+
+		user, err := appdb.CreateUser(r.Context(), pool, email, string(hash), isAdmin, isApproved)
 		if err != nil {
 			render(w, data{Error: "Error creando el usuario: " + err.Error(), Email: email})
+			return
+		}
+
+		if !isApproved {
+			render(w, data{Pending: true})
 			return
 		}
 
@@ -157,11 +161,8 @@ func handleLogin(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		count, _ := appdb.CountUsers(r.Context(), pool)
-		allowRegister := count == 0
-
 		if r.Method == http.MethodGet {
-			render(w, data{AllowRegister: allowRegister})
+			render(w, data{AllowRegister: true})
 			return
 		}
 
@@ -170,11 +171,11 @@ func handleLogin(pool *pgxpool.Pool) http.HandlerFunc {
 
 		user, err := appdb.GetUserByEmail(r.Context(), pool, email)
 		if err != nil || !user.IsActive {
-			render(w, data{Error: "Credenciales incorrectas", Email: email, AllowRegister: allowRegister})
+			render(w, data{Error: "Credenciales incorrectas", Email: email, AllowRegister: true})
 			return
 		}
 		if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
-			render(w, data{Error: "Credenciales incorrectas", Email: email, AllowRegister: allowRegister})
+			render(w, data{Error: "Credenciales incorrectas", Email: email, AllowRegister: true})
 			return
 		}
 
@@ -306,6 +307,11 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 
 		if r.Method == http.MethodGet {
 			render(w, buildData(r, user, false, "", false, ""))
+			return
+		}
+
+		if !user.IsApproved {
+			render(w, buildData(r, user, false, "Tu cuenta está pendiente de aprobación por un administrador.", false, ""))
 			return
 		}
 
@@ -551,6 +557,10 @@ func handleAdminToggleUser(pool *pgxpool.Pool) http.HandlerFunc {
     {{if .IsActive}}<span class="badge badge-active">Activo</span>
     {{else}}<span class="badge badge-inactive">Inactivo</span>{{end}}
   </td>
+  <td>
+    {{if .IsApproved}}<span class="badge badge-ok">Aprobado</span>
+    {{else}}<span class="badge badge-skip">Pendiente</span>{{end}}
+  </td>
   <td style="color:#6e6e73;font-size:.825rem">{{.CreatedAt.Format "02/01/2006"}}</td>
   <td>
     <button class="btn btn-ghost btn-sm"
@@ -559,6 +569,14 @@ func handleAdminToggleUser(pool *pgxpool.Pool) http.HandlerFunc {
       hx-swap="outerHTML">
       {{if .IsActive}}Desactivar{{else}}Activar{{end}}
     </button>
+    {{if not .IsApproved}}
+    <button class="btn btn-ghost btn-sm" style="margin-left:.35rem"
+      hx-post="/admin/users/{{.ID}}/approve"
+      hx-target="#user-{{.ID}}"
+      hx-swap="outerHTML">
+      Aprobar
+    </button>
+    {{end}}
     <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
   </td>
 </tr>`))
@@ -574,6 +592,61 @@ func handleAdminToggleUser(pool *pgxpool.Pool) http.HandlerFunc {
 
 		if err := appdb.ToggleUserActive(r.Context(), pool, targetID); err != nil {
 			http.Error(w, "Error actualizando usuario", http.StatusInternalServerError)
+			return
+		}
+		user, err := appdb.GetUserByID(r.Context(), pool, targetID)
+		if err != nil {
+			http.Error(w, "Usuario no encontrado", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = rowTmpl.Execute(w, user)
+	}
+}
+
+func handleAdminApproveUser(pool *pgxpool.Pool) http.HandlerFunc {
+	rowTmpl := template.Must(template.New("row").Parse(`
+<tr id="user-{{.ID}}">
+  <td>{{.Email}}</td>
+  <td>{{if .IsAdmin}}<span class="badge badge-ok">Admin</span>{{else}}Usuario{{end}}</td>
+  <td>
+    {{if .IsActive}}<span class="badge badge-active">Activo</span>
+    {{else}}<span class="badge badge-inactive">Inactivo</span>{{end}}
+  </td>
+  <td>
+    {{if .IsApproved}}<span class="badge badge-ok">Aprobado</span>
+    {{else}}<span class="badge badge-skip">Pendiente</span>{{end}}
+  </td>
+  <td style="color:#6e6e73;font-size:.825rem">{{.CreatedAt.Format "02/01/2006"}}</td>
+  <td>
+    <button class="btn btn-ghost btn-sm"
+      hx-post="/admin/users/{{.ID}}/toggle"
+      hx-target="#user-{{.ID}}"
+      hx-swap="outerHTML">
+      {{if .IsActive}}Desactivar{{else}}Activar{{end}}
+    </button>
+    {{if not .IsApproved}}
+    <button class="btn btn-ghost btn-sm" style="margin-left:.35rem"
+      hx-post="/admin/users/{{.ID}}/approve"
+      hx-target="#user-{{.ID}}"
+      hx-swap="outerHTML">
+      Aprobar
+    </button>
+    {{end}}
+    <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
+  </td>
+</tr>`))
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) < 4 {
+			http.Error(w, "ID inválido", http.StatusBadRequest)
+			return
+		}
+		targetID := parts[3]
+
+		if err := appdb.ApproveUser(r.Context(), pool, targetID); err != nil {
+			http.Error(w, "Error aprobando usuario", http.StatusInternalServerError)
 			return
 		}
 		user, err := appdb.GetUserByID(r.Context(), pool, targetID)
@@ -641,6 +714,8 @@ func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 	mux.HandleFunc("/admin/users/", requireAdmin(pool, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/toggle") {
 			handleAdminToggleUser(pool)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/approve") {
+			handleAdminApproveUser(pool)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/logs") {
 			handleAdminUserLogs(pool)(w, r)
 		} else {

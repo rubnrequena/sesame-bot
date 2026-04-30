@@ -18,6 +18,10 @@
 <div class="card">
   <h1>Dashboard</h1>
 
+  {{if not .User.IsApproved}}
+  <div class="flash-err">Tu cuenta está pendiente de aprobación por un administrador. Podrás guardar tu configuración una vez que sea aprobada.</div>
+  {{end}}
+
   {{if .Config.SesameEmail}}
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem">
     <div style="background:#f5f5f7;border-radius:12px;padding:1rem 1.25rem">

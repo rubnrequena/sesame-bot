@@ -4,6 +4,9 @@
 {{define "content"}}
 <div class="card card-sm">
   <h1>Crear cuenta</h1>
+  {{if .Pending}}
+  <div class="flash-ok">Cuenta creada. Un administrador deberá aprobarla antes de que puedas guardar tu configuración. Ya puedes <a href="/login" style="color:#1d6f33">iniciar sesión</a>.</div>
+  {{else}}
   {{if .Error}}<div class="flash-err">{{.Error}}</div>{{end}}
   <form method="POST" action="/register">
     <label>Correo electrónico
@@ -24,6 +27,7 @@
   <p style="text-align:center;margin-top:1.25rem;font-size:.875rem;color:#6e6e73">
     ¿Ya tienes cuenta? <a href="/login" style="color:#0071e3">Entrar</a>
   </p>
+  {{end}}
 </div>
 <script>
 function togglePw() {

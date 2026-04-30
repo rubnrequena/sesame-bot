@@ -14,14 +14,14 @@ func CountUsers(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 	return count, err
 }
 
-func CreateUser(ctx context.Context, pool *pgxpool.Pool, email, passwordHash string, isAdmin bool) (*models.User, error) {
+func CreateUser(ctx context.Context, pool *pgxpool.Pool, email, passwordHash string, isAdmin, isApproved bool) (*models.User, error) {
 	u := &models.User{}
 	err := pool.QueryRow(ctx,
-		`INSERT INTO users(email, password_hash, is_admin)
-		 VALUES($1, $2, $3)
-		 RETURNING id, email, password_hash, is_admin, is_active, created_at, updated_at`,
-		email, passwordHash, isAdmin,
-	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+		`INSERT INTO users(email, password_hash, is_admin, is_approved)
+		 VALUES($1, $2, $3, $4)
+		 RETURNING id, email, password_hash, is_admin, is_active, is_approved, created_at, updated_at`,
+		email, passwordHash, isAdmin, isApproved,
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.IsApproved, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("crear usuario: %w", err)
 	}
@@ -34,13 +34,19 @@ func CreateUser(ctx context.Context, pool *pgxpool.Pool, email, passwordHash str
 	return u, nil
 }
 
+func ApproveUser(ctx context.Context, pool *pgxpool.Pool, id string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE users SET is_approved = TRUE, updated_at = NOW() WHERE id=$1`, id)
+	return err
+}
+
 func GetUserByEmail(ctx context.Context, pool *pgxpool.Pool, email string) (*models.User, error) {
 	u := &models.User{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, email, password_hash, is_admin, is_active, created_at, updated_at
+		`SELECT id, email, password_hash, is_admin, is_active, is_approved, created_at, updated_at
 		 FROM users WHERE email=$1`,
 		email,
-	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.IsApproved, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -50,10 +56,10 @@ func GetUserByEmail(ctx context.Context, pool *pgxpool.Pool, email string) (*mod
 func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id string) (*models.User, error) {
 	u := &models.User{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, email, password_hash, is_admin, is_active, created_at, updated_at
+		`SELECT id, email, password_hash, is_admin, is_active, is_approved, created_at, updated_at
 		 FROM users WHERE id=$1`,
 		id,
-	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.IsApproved, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +68,7 @@ func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id string) (*models.Us
 
 func ListUsers(ctx context.Context, pool *pgxpool.Pool) ([]models.User, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT id, email, password_hash, is_admin, is_active, created_at, updated_at
+		`SELECT id, email, password_hash, is_admin, is_active, is_approved, created_at, updated_at
 		 FROM users ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
@@ -72,7 +78,7 @@ func ListUsers(ctx context.Context, pool *pgxpool.Pool) ([]models.User, error) {
 	var users []models.User
 	for rows.Next() {
 		var u models.User
-		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.IsApproved, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		users = append(users, u)
@@ -97,6 +103,7 @@ func LoadActiveUsersWithConfig(ctx context.Context, pool *pgxpool.Pool) ([]model
 		 FROM users u
 		 JOIN user_configs c ON c.user_id = u.id
 		 WHERE u.is_active = TRUE
+		   AND u.is_approved = TRUE
 		   AND c.sesame_email != ''
 		   AND c.hours_in != ''
 		   AND c.hours_out != ''`)

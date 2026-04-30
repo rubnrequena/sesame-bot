@@ -34,12 +34,12 @@ func CreateSession(ctx context.Context, pool *pgxpool.Pool, userID string) (stri
 func GetSessionUser(ctx context.Context, pool *pgxpool.Pool, token string) (*models.User, error) {
 	u := &models.User{}
 	err := pool.QueryRow(ctx,
-		`SELECT u.id, u.email, u.password_hash, u.is_admin, u.is_active, u.created_at, u.updated_at
+		`SELECT u.id, u.email, u.password_hash, u.is_admin, u.is_active, u.is_approved, u.created_at, u.updated_at
 		 FROM sessions s
 		 JOIN users u ON u.id = s.user_id
 		 WHERE s.token=$1 AND s.expires_at > NOW() AND u.is_active = TRUE`,
 		token,
-	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.IsActive, &u.IsApproved, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
