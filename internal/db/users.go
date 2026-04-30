@@ -86,6 +86,12 @@ func ListUsers(ctx context.Context, pool *pgxpool.Pool) ([]models.User, error) {
 	return users, rows.Err()
 }
 
+func UpdateUserPassword(ctx context.Context, pool *pgxpool.Pool, id, hash string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE users SET password_hash=$1, updated_at=NOW() WHERE id=$2`, hash, id)
+	return err
+}
+
 func ToggleUserActive(ctx context.Context, pool *pgxpool.Pool, id string) error {
 	_, err := pool.Exec(ctx,
 		`UPDATE users SET is_active = NOT is_active, updated_at = NOW() WHERE id=$1`, id)

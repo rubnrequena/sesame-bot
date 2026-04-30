@@ -66,6 +66,41 @@
   </form>
 
   <hr class="section-divider">
+  <h2>Cambiar contraseña de acceso</h2>
+  {{if .AccountPwSuccess}}<div class="flash-ok">Contraseña de acceso actualizada correctamente.</div>{{end}}
+  {{if .AccountPwError}}<div class="flash-err">{{.AccountPwError}}</div>{{end}}
+
+  <form method="POST" action="/config/account-password">
+    <label>Contraseña actual</label>
+    <div class="pw-wrap">
+      <input id="cpw" type="password" name="current_password" required autocomplete="current-password">
+      <button type="button" class="pw-toggle" onclick="togglePw('cpw','cico-s','cico-h')" aria-label="Mostrar">
+        <svg id="cico-s" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg id="cico-h" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
+    <label>Nueva contraseña <span class="hint">(mínimo 8 caracteres)</span></label>
+    <div class="pw-wrap">
+      <input id="npw" type="password" name="new_password" required minlength="8" autocomplete="new-password">
+      <button type="button" class="pw-toggle" onclick="togglePw('npw','nico-s','nico-h')" aria-label="Mostrar">
+        <svg id="nico-s" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg id="nico-h" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
+    <label>Confirmar nueva contraseña</label>
+    <div class="pw-wrap">
+      <input id="rpw" type="password" name="confirm_password" required minlength="8" autocomplete="new-password">
+      <button type="button" class="pw-toggle" onclick="togglePw('rpw','rico-s','rico-h')" aria-label="Mostrar">
+        <svg id="rico-s" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg id="rico-h" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
+    <div class="actions">
+      <button type="submit" class="btn">Actualizar contraseña</button>
+    </div>
+  </form>
+
+  <hr class="section-divider">
   <h2>Contraseña de Sesame Time</h2>
   {{if .PwSuccess}}<div class="flash-ok">Contraseña actualizada.</div>{{end}}
   {{if .PwError}}<div class="flash-err">{{.PwError}}</div>{{end}}

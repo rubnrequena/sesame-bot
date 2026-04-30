@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -247,16 +249,18 @@ type dayOption struct {
 
 func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFunc {
 	type data struct {
-		User           *models.User
-		Cfg            *models.UserConfig
-		LocationOffice string
-		LocationHome   string
-		AllDays        []dayOption
-		Success        bool
-		Error          string
-		PwSuccess      bool
-		PwError        string
-		PwMode         string
+		User              *models.User
+		Cfg               *models.UserConfig
+		LocationOffice    string
+		LocationHome      string
+		AllDays           []dayOption
+		Success           bool
+		Error             string
+		PwSuccess         bool
+		PwError           string
+		PwMode            string
+		AccountPwSuccess  bool
+		AccountPwError    string
 	}
 
 	tmpl := parseTemplates("config.html")
@@ -282,16 +286,18 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 		}
 
 		return data{
-			User:           user,
-			Cfg:            cfg,
-			LocationOffice: locationToStr(cfg.LocationOfficeLat, cfg.LocationOfficeLon),
-			LocationHome:   locationToStr(cfg.LocationHomeLat, cfg.LocationHomeLon),
-			AllDays:        allDays,
-			Success:        success,
-			Error:          errMsg,
-			PwSuccess:      pwSuccess,
-			PwError:        pwErr,
-			PwMode:         pwMode,
+			User:             user,
+			Cfg:              cfg,
+			LocationOffice:   locationToStr(cfg.LocationOfficeLat, cfg.LocationOfficeLon),
+			LocationHome:     locationToStr(cfg.LocationHomeLat, cfg.LocationHomeLon),
+			AllDays:          allDays,
+			Success:          success,
+			Error:            errMsg,
+			PwSuccess:        pwSuccess,
+			PwError:          pwErr,
+			PwMode:           pwMode,
+			AccountPwSuccess: r.URL.Query().Get("account_pw_success") == "1",
+			AccountPwError:   r.URL.Query().Get("account_pw_error"),
 		}
 	}
 
@@ -306,7 +312,9 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 		user := currentUser(r)
 
 		if r.Method == http.MethodGet {
-			render(w, buildData(r, user, false, "", false, ""))
+			pwSuccess := r.URL.Query().Get("pw_success") == "1"
+			pwErr := r.URL.Query().Get("pw_error")
+			render(w, buildData(r, user, false, "", pwSuccess, pwErr))
 			return
 		}
 
@@ -462,6 +470,65 @@ func handleConfigPassword(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.H
 	}
 }
 
+// ─── Account password ─────────────────────────────────────────────────────────
+
+func handleConfigAccountPassword(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+
+		currentPw := r.FormValue("current_password")
+		newPw := r.FormValue("new_password")
+		confirmPw := r.FormValue("confirm_password")
+
+		redirect := func(errMsg string) {
+			if errMsg != "" {
+				http.Redirect(w, r, "/config?account_pw_error="+strings.ReplaceAll(errMsg, " ", "+"), http.StatusFound)
+			} else {
+				http.Redirect(w, r, "/config?account_pw_success=1", http.StatusFound)
+			}
+		}
+
+		if currentPw == "" || newPw == "" || confirmPw == "" {
+			redirect("Todos los campos son obligatorios")
+			return
+		}
+
+		dbUser, err := appdb.GetUserByID(r.Context(), pool, user.ID)
+		if err != nil {
+			redirect("Error obteniendo datos del usuario")
+			return
+		}
+
+		if bcrypt.CompareHashAndPassword([]byte(dbUser.PasswordHash), []byte(currentPw)) != nil {
+			redirect("La contraseña actual no es correcta")
+			return
+		}
+
+		if len(newPw) < 8 {
+			redirect("La nueva contraseña debe tener al menos 8 caracteres")
+			return
+		}
+
+		if newPw != confirmPw {
+			redirect("Las contraseñas nuevas no coinciden")
+			return
+		}
+
+		hash, err := bcrypt.GenerateFromPassword([]byte(newPw), 12)
+		if err != nil {
+			redirect("Error procesando la contraseña")
+			return
+		}
+
+		if err := appdb.UpdateUserPassword(r.Context(), pool, user.ID, string(hash)); err != nil {
+			redirect("Error guardando la contraseña")
+			return
+		}
+
+		redirect("")
+	}
+}
+
 // ─── Logs ─────────────────────────────────────────────────────────────────────
 
 func handleLogs(pool *pgxpool.Pool) http.HandlerFunc {
@@ -577,6 +644,12 @@ func handleAdminToggleUser(pool *pgxpool.Pool) http.HandlerFunc {
       Aprobar
     </button>
     {{end}}
+    <button class="btn btn-ghost btn-sm" style="margin-left:.35rem"
+      hx-post="/admin/users/{{.ID}}/reset-password"
+      hx-target="#reset-result"
+      hx-swap="innerHTML">
+      Reset pwd
+    </button>
     <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
   </td>
 </tr>`))
@@ -633,6 +706,12 @@ func handleAdminApproveUser(pool *pgxpool.Pool) http.HandlerFunc {
       Aprobar
     </button>
     {{end}}
+    <button class="btn btn-ghost btn-sm" style="margin-left:.35rem"
+      hx-post="/admin/users/{{.ID}}/reset-password"
+      hx-target="#reset-result"
+      hx-swap="innerHTML">
+      Reset pwd
+    </button>
     <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
   </td>
 </tr>`))
@@ -693,6 +772,63 @@ func handleAdminUserLogs(pool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 
+func generateRandomPassword(length int) (string, error) {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	for i, v := range b {
+		b[i] = charset[int(v)%len(charset)]
+	}
+	return string(b), nil
+}
+
+func handleAdminResetPassword(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) < 4 {
+			http.Error(w, "ID inválido", http.StatusBadRequest)
+			return
+		}
+		targetID := parts[3]
+
+		user, err := appdb.GetUserByID(r.Context(), pool, targetID)
+		if err != nil {
+			http.Error(w, "Usuario no encontrado", http.StatusNotFound)
+			return
+		}
+
+		newPassword, err := generateRandomPassword(16)
+		if err != nil {
+			http.Error(w, "Error generando contraseña", http.StatusInternalServerError)
+			return
+		}
+
+		hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 12)
+		if err != nil {
+			http.Error(w, "Error procesando contraseña", http.StatusInternalServerError)
+			return
+		}
+
+		if err := appdb.UpdateUserPassword(r.Context(), pool, targetID, string(hash)); err != nil {
+			http.Error(w, "Error actualizando contraseña", http.StatusInternalServerError)
+			return
+		}
+
+		log.Printf("Admin: contraseña reseteada para usuario %s (%s)", targetID, user.Email)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w,
+			`<div class="flash-ok" style="justify-content:space-between;align-items:center">
+  <span>Nueva contraseña para <strong>%s</strong>:</span>
+  <code id="new-pw" style="background:#e8f9ee;padding:.2rem .6rem;border-radius:6px;font-size:.95rem;cursor:pointer;user-select:all"
+    onclick="navigator.clipboard.writeText(this.innerText).then(()=>this.style.outline='2px solid #1a7f4b')" title="Clic para copiar">%s</code>
+</div>`,
+			template.HTMLEscapeString(user.Email), newPassword)
+	}
+}
+
 func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 	port := os.Getenv("ADMIN_PORT")
 	if port == "" {
@@ -708,6 +844,7 @@ func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 	mux.HandleFunc("/dashboard", requireAuth(pool, handleDashboard(pool, sched)))
 	mux.HandleFunc("/config", requireAuth(pool, handleConfig(pool, sched)))
 	mux.HandleFunc("/config/password", requireAuth(pool, handleConfigPassword(pool, sched)))
+	mux.HandleFunc("/config/account-password", requireAuth(pool, handleConfigAccountPassword(pool)))
 	mux.HandleFunc("/logs", requireAuth(pool, handleLogs(pool)))
 
 	mux.HandleFunc("/admin", requireAdmin(pool, handleAdmin(pool)))
@@ -716,6 +853,8 @@ func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 			handleAdminToggleUser(pool)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/approve") {
 			handleAdminApproveUser(pool)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/reset-password") {
+			handleAdminResetPassword(pool)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/logs") {
 			handleAdminUserLogs(pool)(w, r)
 		} else {

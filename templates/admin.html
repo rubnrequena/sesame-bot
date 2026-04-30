@@ -19,6 +19,7 @@
   <h1>Panel de administración</h1>
   {{if .Success}}<div class="flash-ok">{{.Success}}</div>{{end}}
 
+  <div id="reset-result"></div>
   <h2>Usuarios ({{len .Users}})</h2>
   {{if .Users}}
   <table>
@@ -52,6 +53,12 @@
           Aprobar
         </button>
         {{end}}
+        <button class="btn btn-ghost btn-sm" style="margin-left:.35rem"
+          hx-post="/admin/users/{{.ID}}/reset-password"
+          hx-target="#reset-result"
+          hx-swap="innerHTML">
+          Reset pwd
+        </button>
         <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
       </td>
     </tr>
