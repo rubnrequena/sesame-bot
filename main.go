@@ -63,6 +63,7 @@ var dayNames = map[time.Weekday]string{
 }
 
 type config struct {
+	userID         string
 	email          string
 	password       string
 	headless       bool
@@ -133,6 +134,7 @@ func runActionBridge(
 	_ time.Time,
 ) error {
 	cfg := config{
+		userID:   userID,
 		email:    email,
 		password: password,
 		headless: headless,
@@ -271,7 +273,7 @@ func parseTime(raw string, action actionType) (scheduledTime, error) {
 // startHolidayCapture enables CDP network tracking on the page BEFORE any navigation
 // and listens for the holidays API response that the SPA makes with its own auth session.
 // It returns a wait function that must be called after login to collect the results.
-func startHolidayCapture(page *rod.Page) func() []holidayEntry {
+func startHolidayCapture(page *rod.Page, logger *log.Logger) func() []holidayEntry {
 	type pageResult struct {
 		entries  []holidayEntry
 		lastPage int
@@ -280,7 +282,7 @@ func startHolidayCapture(page *rod.Page) func() []holidayEntry {
 	year := strconv.Itoa(time.Now().Year())
 
 	if err := (proto.NetworkEnable{}).Call(page); err != nil {
-		log.Printf("holidays: error habilitando network tracking: %v", err)
+		logger.Printf("holidays: error habilitando network tracking: %v", err)
 		return func() []holidayEntry { return nil }
 	}
 
@@ -288,7 +290,7 @@ func startHolidayCapture(page *rod.Page) func() []holidayEntry {
 		if !strings.Contains(e.Response.URL, "holidays") || !strings.Contains(e.Response.URL, year) {
 			return
 		}
-		log.Printf("holidays: respuesta detectada: %s (status %d)", e.Response.URL, e.Response.Status)
+		logger.Printf("holidays: respuesta detectada: %s (status %d)", e.Response.URL, e.Response.Status)
 
 		result, err := proto.NetworkGetResponseBody{RequestID: e.RequestID}.Call(page)
 		if err != nil {
@@ -299,7 +301,7 @@ func startHolidayCapture(page *rod.Page) func() []holidayEntry {
 		if result.Base64Encoded {
 			decoded, decErr := base64.StdEncoding.DecodeString(result.Body)
 			if decErr != nil {
-				log.Printf("holidays: error decodificando base64: %v", decErr)
+				logger.Printf("holidays: error decodificando base64: %v", decErr)
 				return
 			}
 			bodyStr = string(decoded)
@@ -307,14 +309,14 @@ func startHolidayCapture(page *rod.Page) func() []holidayEntry {
 
 		var p holidaysPage
 		if err := json.Unmarshal([]byte(bodyStr), &p); err != nil {
-			log.Printf("holidays: error parseando JSON: %v — body: %.200s", err, bodyStr)
+			logger.Printf("holidays: error parseando JSON: %v — body: %.200s", err, bodyStr)
 			return
 		}
-		log.Printf("holidays: página %d/%d, %d entradas", p.Meta.CurrentPage, p.Meta.LastPage, len(p.Data))
+		logger.Printf("holidays: página %d/%d, %d entradas", p.Meta.CurrentPage, p.Meta.LastPage, len(p.Data))
 		select {
 		case ch <- pageResult{p.Data, p.Meta.LastPage}:
 		default:
-			log.Printf("holidays: canal lleno, descartando página %d", p.Meta.CurrentPage)
+			logger.Printf("holidays: canal lleno, descartando página %d", p.Meta.CurrentPage)
 		}
 	})
 	go wait()
@@ -328,13 +330,13 @@ func startHolidayCapture(page *rod.Page) func() []holidayEntry {
 				case next := <-ch:
 					all = append(all, next.entries...)
 				case <-time.After(5 * time.Second):
-					log.Printf("holidays: timeout esperando página %d/%d", p, first.lastPage)
+					logger.Printf("holidays: timeout esperando página %d/%d", p, first.lastPage)
 				}
 			}
-			log.Printf("holidays: total %d días libres cargados", len(all))
+			logger.Printf("holidays: total %d días libres cargados", len(all))
 			return all
 		case <-time.After(8 * time.Second):
-			log.Println("holidays: timeout — no se recibió respuesta del endpoint holidays")
+			logger.Println("holidays: timeout — no se recibió respuesta del endpoint holidays")
 			return nil
 		}
 	}
@@ -343,6 +345,8 @@ func startHolidayCapture(page *rod.Page) func() []holidayEntry {
 // ─── Browser automation ───────────────────────────────────────────────────────
 
 func runAction(cfg config, action actionType) error {
+	logger := log.New(log.Writer(), fmt.Sprintf("[%s] ", cfg.userID), log.LstdFlags)
+
 	u := launcher.New().
 		Headless(cfg.headless).
 		Set("disable-blink-features", "AutomationControlled").
@@ -355,7 +359,7 @@ func runAction(cfg config, action actionType) error {
 	page := browser.MustPage("").Timeout(pageTimeout)
 
 	// Register CDP network listener before any navigation so the SPA request is captured.
-	waitHolidays := startHolidayCapture(page)
+	waitHolidays := startHolidayCapture(page, logger)
 
 	loc := getLocationForDay(cfg, time.Now().Weekday())
 	if loc.lat != 0 || loc.lon != 0 {
@@ -377,29 +381,29 @@ func runAction(cfg config, action actionType) error {
 		if err := permCmd.Call(browser); err != nil {
 			return fmt.Errorf("conceder permiso de geolocalización: %w", err)
 		}
-		log.Printf("Geolocalización aplicada: %.6f, %.6f", loc.lat, loc.lon)
+		logger.Printf("Geolocalización aplicada: %.6f, %.6f", loc.lat, loc.lon)
 	}
 
-	log.Println("Navegando al login...")
+	logger.Println("Navegando al login...")
 	if err := page.Navigate(loginURL); err != nil {
 		return fmt.Errorf("navegar a login: %w", err)
 	}
 	if err := page.WaitLoad(); err != nil {
 		return fmt.Errorf("esperar carga login: %w", err)
 	}
-	if err := doLogin(page, cfg.email, cfg.password); err != nil {
+	if err := doLogin(page, cfg.email, cfg.password, logger); err != nil {
 		return fmt.Errorf("login: %w", err)
 	}
-	log.Println("Login exitoso")
+	logger.Println("Login exitoso")
 
 	holidays := waitHolidays()
 	today := time.Now().Format("2006-01-02")
 	if len(holidays) == 0 {
-		log.Println("holidays: sin datos de días libres — se procede con el fichaje")
+		logger.Println("holidays: sin datos de días libres — se procede con el fichaje")
 	}
 	for _, h := range holidays {
 		if h.Date == today {
-			log.Printf("Día festivo detectado: %s (%s) — omitiendo fichaje", today, h.Name)
+			logger.Printf("Día festivo detectado: %s (%s) — omitiendo fichaje", today, h.Name)
 			return fmt.Errorf("%s: %w", h.Name, scheduler.ErrSkipped)
 		}
 	}
@@ -413,7 +417,7 @@ func runAction(cfg config, action actionType) error {
 		}
 	}
 	if next != nil {
-		log.Printf("Próximo día libre: %s (%s)", next.Date, next.Name)
+		logger.Printf("Próximo día libre: %s (%s)", next.Date, next.Name)
 	}
 
 	var buttonText string
@@ -423,7 +427,7 @@ func runAction(cfg config, action actionType) error {
 		buttonText = "Salir"
 	}
 
-	log.Printf("Buscando botón %q...", buttonText)
+	logger.Printf("Buscando botón %q...", buttonText)
 	btn, err := waitForElementByText(page, "span", buttonText)
 	if err != nil {
 		return fmt.Errorf("buscar botón %q: %w", buttonText, err)
@@ -433,26 +437,26 @@ func runAction(cfg config, action actionType) error {
 	}
 
 	if cfg.dryRun {
-		log.Printf("[SIMULACRO] Botón %q localizado — click omitido (DRY_RUN=true)", buttonText)
+		logger.Printf("[SIMULACRO] Botón %q localizado — click omitido (DRY_RUN=true)", buttonText)
 		return nil
 	}
 
 	if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("click en botón %q: %w", buttonText, err)
 	}
-	log.Printf("Click en %q realizado. Esperando 5 segundos...", buttonText)
+	logger.Printf("Click en %q realizado. Esperando 5 segundos...", buttonText)
 
 	time.Sleep(5 * time.Second)
 
-	log.Println("Cerrando sesión...")
-	if err := doLogout(page); err != nil {
+	logger.Println("Cerrando sesión...")
+	if err := doLogout(page, logger); err != nil {
 		return fmt.Errorf("logout: %w", err)
 	}
 
 	return nil
 }
 
-func doLogin(page *rod.Page, email, password string) error {
+func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 	emailSelectors := []string{
 		`input[type="email"]`,
 		`input[name="email"]`,
@@ -474,7 +478,7 @@ func doLogin(page *rod.Page, email, password string) error {
 		return fmt.Errorf("escribir email: %w", err)
 	}
 
-	log.Println("Click en #btn-next-login...")
+	logger.Println("Click en #btn-next-login...")
 	nextBtn, err := page.Timeout(actionTimeout).Element("#btn-next-login")
 	if err != nil {
 		return fmt.Errorf("botón #btn-next-login no encontrado: %w", err)
@@ -491,7 +495,7 @@ func doLogin(page *rod.Page, email, password string) error {
 		return fmt.Errorf("escribir password: %w", err)
 	}
 
-	log.Println("Click en #btn-login-login...")
+	logger.Println("Click en #btn-login-login...")
 	loginBtn, err := page.Timeout(actionTimeout).Element("#btn-login-login")
 	if err != nil {
 		return fmt.Errorf("botón #btn-login-login no encontrado: %w", err)
@@ -500,7 +504,7 @@ func doLogin(page *rod.Page, email, password string) error {
 		return fmt.Errorf("click #btn-login-login: %w", err)
 	}
 
-	log.Println("Esperando redirección post-login...")
+	logger.Println("Esperando redirección post-login...")
 	deadline := time.Now().Add(pageTimeout)
 	for time.Now().Before(deadline) {
 		info, err := page.Info()
@@ -512,7 +516,7 @@ func doLogin(page *rod.Page, email, password string) error {
 	return fmt.Errorf("timeout esperando redirección post-login")
 }
 
-func doLogout(page *rod.Page) error {
+func doLogout(page *rod.Page, logger *log.Logger) error {
 	profileBtn, err := page.Timeout(actionTimeout).Element(".headerProfileName")
 	if err != nil {
 		return fmt.Errorf("botón .headerProfileName no encontrado: %w", err)
@@ -529,7 +533,7 @@ func doLogout(page *rod.Page) error {
 		return fmt.Errorf("click en #click-admin-header-logout: %w", err)
 	}
 
-	log.Println("Sesión cerrada")
+	logger.Println("Sesión cerrada")
 	return nil
 }
 
