@@ -83,7 +83,7 @@
           <input type="hidden" name="hours" id="hours-{{.Weekday}}" value="">
           <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
             <button type="button" class="btn btn-sm btn-ghost" onclick="doOpenModal({{.Weekday}},'{{.Name}}')">+ Añadir hora</button>
-            <button type="submit" class="btn btn-sm" id="save-{{.Weekday}}" disabled style="display:inline-flex;align-items:center;gap:.35rem" title="Guardar">
+            <button type="button" class="btn btn-sm" id="save-{{.Weekday}}" disabled style="display:inline-flex;align-items:center;gap:.35rem" title="Guardar" onclick="doSaveDay({{.Weekday}})">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
               <span class="btn-label">Guardar</span>
             </button>
@@ -260,7 +260,7 @@ function _doRender(wd) {
   if (saveBtn) saveBtn.disabled = !valid;
   if (delBtn) delBtn.style.display = (_dowHasServer[wd] || hours.length > 0) ? 'inline-flex' : 'none';
   var copyBtn = document.getElementById('copy-' + wd);
-  if (copyBtn) copyBtn.style.display = valid ? 'inline-flex' : 'none';
+  if (copyBtn) { copyBtn.style.display = hours.length > 0 ? 'inline-flex' : 'none'; copyBtn.disabled = !valid; }
   // update accordion status
   var statusEl = document.getElementById('acc-status-' + wd);
   if (statusEl) {
@@ -331,6 +331,38 @@ function doConfirmHour() {
 function _doRemove(wd, idx) {
   _dow[wd].splice(idx, 1);
   _doRender(wd);
+}
+
+function doSaveDay(wd) {
+  var hours = _dow[wd] || [];
+  if (hours.length < 2 || hours.length % 2 !== 0) {
+    showToast('El número de horas debe ser par y al menos 2', 'error');
+    return;
+  }
+  var saveBtn = document.getElementById('save-' + wd);
+  saveBtn.disabled = true;
+  var body = new URLSearchParams();
+  body.set('weekday', wd);
+  body.set('hours', hours.join(','));
+  fetch('/config/day-overrides', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body.toString()
+  }).then(function(r) {
+    var params = new URL(r.url).searchParams;
+    var err = params.get('day_override_error');
+    if (err) {
+      showToast(err.replace(/\+/g, ' '), 'error');
+      saveBtn.disabled = false;
+    } else {
+      showToast('Horario guardado', 'success');
+      _dowHasServer[wd] = true;
+      _doRender(wd);
+    }
+  }).catch(function() {
+    showToast('Error de red al guardar', 'error');
+    saveBtn.disabled = false;
+  });
 }
 
 function doDeleteOverride(wd) {
