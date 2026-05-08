@@ -95,14 +95,12 @@
     <div id="do-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center">
       <div style="background:#fff;border-radius:18px;padding:2rem;width:min(320px,90vw);box-shadow:0 8px 40px rgba(0,0,0,.18)">
         <h3 id="do-modal-title" style="margin:0 0 1.25rem;font-size:1.05rem;font-weight:600;letter-spacing:-.02em"></h3>
-        <div style="display:flex;gap:.75rem">
-          <label style="flex:1;margin-top:0">Hora
-            <input type="number" id="do-hour" min="0" max="23" placeholder="9" style="margin-top:.35rem">
-          </label>
-          <label style="flex:1;margin-top:0">Minutos
-            <input type="number" id="do-min" min="0" max="59" placeholder="00" style="margin-top:.35rem">
-          </label>
-        </div>
+        <label style="margin-top:0">Hora
+          <input type="text" id="do-time" maxlength="5" placeholder="09:00"
+            autocomplete="off" inputmode="numeric"
+            oninput="_doTimeMask(this)"
+            style="margin-top:.5rem;font-size:1.6rem;letter-spacing:.1em;text-align:center;padding:.65rem 1rem">
+        </label>
         <div style="display:flex;gap:.75rem;margin-top:1.5rem">
           <button class="btn" onclick="doConfirmHour()" style="flex:1">Confirmar</button>
           <button class="btn btn-ghost" onclick="doCloseModal()" style="flex:1">Cancelar</button>
@@ -247,14 +245,29 @@ function _doRender(wd) {
   }
 }
 
+function _doTimeMask(inp) {
+  var raw = inp.value.replace(/\D/g, '').substring(0, 4);
+  var result = raw.length > 2 ? raw.substring(0, 2) + ':' + raw.substring(2) : raw;
+  if (inp.value !== result) {
+    inp.value = result;
+    inp.setSelectionRange(result.length, result.length);
+  }
+  // Live border feedback
+  var parts = result.split(':');
+  var valid = result.length === 5 &&
+    parseInt(parts[0], 10) <= 23 &&
+    parseInt(parts[1], 10) <= 59;
+  inp.style.borderColor = result.length === 0 ? '' : (valid ? '#1a7f4b' : '#e0e0e5');
+}
+
 function doOpenModal(wd, name) {
   _modalWd = wd;
   document.getElementById('do-modal-title').textContent = 'Añadir hora — ' + name;
-  document.getElementById('do-hour').value = '';
-  document.getElementById('do-min').value = '00';
-  var modal = document.getElementById('do-modal');
-  modal.style.display = 'flex';
-  setTimeout(function(){ document.getElementById('do-hour').focus(); }, 50);
+  var inp = document.getElementById('do-time');
+  inp.value = '';
+  inp.style.borderColor = '';
+  document.getElementById('do-modal').style.display = 'flex';
+  setTimeout(function(){ inp.focus(); }, 50);
 }
 
 function doCloseModal() {
@@ -263,10 +276,19 @@ function doCloseModal() {
 }
 
 function doConfirmHour() {
-  var h = parseInt(document.getElementById('do-hour').value, 10);
-  var m = parseInt(document.getElementById('do-min').value || '0', 10);
-  if (isNaN(h) || h < 0 || h > 23) { alert('Hora inválida (0–23)'); return; }
-  if (isNaN(m) || m < 0 || m > 59) { alert('Minutos inválidos (0–59)'); return; }
+  var val = document.getElementById('do-time').value.trim();
+  var parts = val.split(':');
+  if (val.length !== 5 || parts.length !== 2) {
+    document.getElementById('do-time').focus();
+    return;
+  }
+  var h = parseInt(parts[0], 10);
+  var m = parseInt(parts[1], 10);
+  if (isNaN(h) || h < 0 || h > 23 || isNaN(m) || m < 0 || m > 59) {
+    document.getElementById('do-time').style.borderColor = '#e3001a';
+    document.getElementById('do-time').focus();
+    return;
+  }
   var time = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
   if (!_dow[_modalWd]) _dow[_modalWd] = [];
   _dow[_modalWd].push(time);
