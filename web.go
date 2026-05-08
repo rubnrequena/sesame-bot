@@ -83,6 +83,7 @@ func currentUser(r *http.Request) *models.User {
 
 func handleRegister(pool *pgxpool.Pool) http.HandlerFunc {
 	type data struct {
+		User    *models.User
 		Error   string
 		Email   string
 		Pending bool
@@ -150,6 +151,7 @@ func handleRegister(pool *pgxpool.Pool) http.HandlerFunc {
 
 func handleLogin(pool *pgxpool.Pool) http.HandlerFunc {
 	type data struct {
+		User          *models.User
 		Error         string
 		Email         string
 		AllowRegister bool

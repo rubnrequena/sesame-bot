@@ -1,19 +1,5 @@
 {{template "base.html" .}}
 {{define "title"}}Sesame Bot — Admin{{end}}
-{{define "nav"}}
-<nav style="max-width:960px">
-  <a href="/" class="brand">Sesame Bot</a>
-  <a href="/dashboard">Dashboard</a>
-  <a href="/config">Configuración</a>
-  <a href="/logs">Historial</a>
-  <a href="/admin">Admin</a>
-  <span class="spacer"></span>
-  <span style="font-size:.8rem;color:#aeaeb2">{{.User.Email}}</span>
-  <form method="POST" action="/logout" style="display:inline">
-    <button type="submit" class="btn btn-ghost btn-sm">Salir</button>
-  </form>
-</nav>
-{{end}}
 {{define "content"}}
 <div class="card card-wide">
   <h1>Panel de administración</h1>

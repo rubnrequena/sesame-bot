@@ -1,19 +1,5 @@
 {{template "base.html" .}}
 {{define "title"}}Sesame Bot — Logs de usuario{{end}}
-{{define "nav"}}
-<nav>
-  <a href="/" class="brand">Sesame Bot</a>
-  <a href="/dashboard">Dashboard</a>
-  <a href="/config">Configuración</a>
-  <a href="/logs">Historial</a>
-  <a href="/admin">Admin</a>
-  <span class="spacer"></span>
-  <span style="font-size:.8rem;color:#aeaeb2">{{.User.Email}}</span>
-  <form method="POST" action="/logout" style="display:inline">
-    <button type="submit" class="btn btn-ghost btn-sm">Salir</button>
-  </form>
-</nav>
-{{end}}
 {{define "content"}}
 <div class="card">
   <a href="/admin" style="font-size:.875rem;color:#0071e3;text-decoration:none">← Volver al admin</a>
