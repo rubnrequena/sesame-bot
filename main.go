@@ -18,7 +18,6 @@ import (
 
 	appdb "sesame-bot/internal/db"
 	"sesame-bot/internal/crypto"
-	"sesame-bot/internal/models"
 	"sesame-bot/internal/scheduler"
 )
 
@@ -35,17 +34,6 @@ const (
 	actionIn  actionType = "IN"
 	actionOut actionType = "OUT"
 )
-
-type scheduledTime struct {
-	hour   int
-	minute int
-	action actionType
-}
-
-type daySchedule struct {
-	in  []string
-	out []string
-}
 
 type location struct {
 	lat float64
@@ -67,11 +55,7 @@ type config struct {
 	email          string
 	password       string
 	headless       bool
-	weekend        bool
 	dryRun         bool
-	hoursIn        []string
-	hoursOut       []string
-	overrides      map[time.Weekday]daySchedule
 	locationOffice location
 	locationHome   location
 	officeDays     map[time.Weekday]bool
@@ -123,26 +107,21 @@ func main() {
 	sched.Run(ctx)
 }
 
-// runActionBridge adapts the scheduler's generic call to the concrete runAction function.
+// runActionBridge adapts the scheduler's call to the concrete runAction function.
+// headless mode is controlled by the HEADLESS env var (default: true).
 func runActionBridge(
 	userID, email, password string,
-	headless, weekend bool,
-	hoursIn, hoursOut, officeDays string,
+	officeDays string,
 	offLat, offLon, homeLat, homeLon float64,
-	overrides []models.DayOverride,
 	action string,
 	_ time.Time,
 ) error {
 	cfg := config{
-		userID:   userID,
-		email:    email,
-		password: password,
-		headless: headless,
-		weekend:  weekend,
-		dryRun:   os.Getenv("DRY_RUN") == "true",
-		hoursIn:  splitTimes(hoursIn),
-		hoursOut: splitTimes(hoursOut),
-		overrides: buildOverridesFromDB(overrides),
+		userID:         userID,
+		email:          email,
+		password:       password,
+		headless:       os.Getenv("HEADLESS") != "false",
+		dryRun:         os.Getenv("DRY_RUN") == "true",
 		locationOffice: location{lat: offLat, lon: offLon},
 		locationHome:   location{lat: homeLat, lon: homeLon},
 		officeDays:     parseOfficeDays(officeDays),
@@ -150,50 +129,7 @@ func runActionBridge(
 	return runAction(cfg, actionType(action))
 }
 
-func buildOverridesFromDB(rows []models.DayOverride) map[time.Weekday]daySchedule {
-	out := make(map[time.Weekday]daySchedule)
-	for _, o := range rows {
-		out[time.Weekday(o.Weekday)] = daySchedule{
-			in:  splitTimes(o.HoursIn),
-			out: splitTimes(o.HoursOut),
-		}
-	}
-	return out
-}
-
-// ─── Schedule helpers ─────────────────────────────────────────────────────────
-
-func getScheduleForDay(cfg config, day time.Weekday) []scheduledTime {
-	isWeekend := day == time.Saturday || day == time.Sunday
-	if isWeekend && !cfg.weekend {
-		return nil
-	}
-
-	inTimes := cfg.hoursIn
-	outTimes := cfg.hoursOut
-
-	if override, ok := cfg.overrides[day]; ok {
-		if len(override.in) > 0 {
-			inTimes = override.in
-		}
-		if len(override.out) > 0 {
-			outTimes = override.out
-		}
-	}
-
-	var schedule []scheduledTime
-	for _, raw := range inTimes {
-		if st, err := parseTime(raw, actionIn); err == nil {
-			schedule = append(schedule, st)
-		}
-	}
-	for _, raw := range outTimes {
-		if st, err := parseTime(raw, actionOut); err == nil {
-			schedule = append(schedule, st)
-		}
-	}
-	return schedule
-}
+// ─── Location helper ──────────────────────────────────────────────────────────
 
 func getLocationForDay(cfg config, day time.Weekday) location {
 	if cfg.officeDays[day] {
@@ -257,15 +193,15 @@ func splitTimes(raw string) []string {
 	return result
 }
 
-func parseTime(raw string, action actionType) (scheduledTime, error) {
+func parseTime(raw string) error {
 	var h, m int
 	if _, err := fmt.Sscanf(raw, "%d:%d", &h, &m); err != nil {
-		return scheduledTime{}, fmt.Errorf("formato esperado HH:MM")
+		return fmt.Errorf("formato esperado HH:MM")
 	}
 	if h < 0 || h > 23 || m < 0 || m > 59 {
-		return scheduledTime{}, fmt.Errorf("hora fuera de rango")
+		return fmt.Errorf("hora fuera de rango")
 	}
-	return scheduledTime{hour: h, minute: m, action: action}, nil
+	return nil
 }
 
 // ─── Holiday helpers ──────────────────────────────────────────────────────────

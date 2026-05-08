@@ -18,10 +18,6 @@ type UserConfig struct {
 	UserID            string
 	SesameEmail       string
 	SesamePasswordEnc string // AES-256-GCM ciphertext, empty = solo en memoria
-	Headless          bool
-	Weekend           bool
-	HoursIn           string // "09:00,14:00"
-	HoursOut          string // "13:00,18:00"
 	LocationOfficeLat float64
 	LocationOfficeLon float64
 	LocationHomeLat   float64

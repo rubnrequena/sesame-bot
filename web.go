@@ -377,35 +377,12 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 		}
 
 		sesameEmail := strings.TrimSpace(r.FormValue("sesame_email"))
-		hoursIn := strings.TrimSpace(r.FormValue("hours_in"))
-		hoursOut := strings.TrimSpace(r.FormValue("hours_out"))
-		weekendVal := r.FormValue("weekend")
 		locOfficeRaw := strings.TrimSpace(r.FormValue("location_office"))
 		locHomeRaw := strings.TrimSpace(r.FormValue("location_home"))
 		officeDaysSelected := r.Form["office_days"]
 
 		if sesameEmail == "" {
 			render(w, buildData(r, user, false, "El email de Sesame es obligatorio", false, ""))
-			return
-		}
-		for _, t := range splitTimes(hoursIn) {
-			if _, err := parseTime(t, actionIn); err != nil {
-				render(w, buildData(r, user, false, "HOURS_IN inválido: "+err.Error(), false, ""))
-				return
-			}
-		}
-		if len(splitTimes(hoursIn)) == 0 {
-			render(w, buildData(r, user, false, "El horario de entrada es obligatorio", false, ""))
-			return
-		}
-		for _, t := range splitTimes(hoursOut) {
-			if _, err := parseTime(t, actionOut); err != nil {
-				render(w, buildData(r, user, false, "HOURS_OUT inválido: "+err.Error(), false, ""))
-				return
-			}
-		}
-		if len(splitTimes(hoursOut)) == 0 {
-			render(w, buildData(r, user, false, "El horario de salida es obligatorio", false, ""))
 			return
 		}
 
@@ -420,7 +397,6 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 			return
 		}
 
-		weekend := weekendVal == "true"
 		officeDaysStr := strings.Join(officeDaysSelected, ",")
 
 		// Preserve existing password enc
@@ -434,10 +410,6 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 			UserID:            user.ID,
 			SesameEmail:       sesameEmail,
 			SesamePasswordEnc: pwEnc,
-			Headless:          true,
-			Weekend:           weekend,
-			HoursIn:           hoursIn,
-			HoursOut:          hoursOut,
 			LocationOfficeLat: locOffice.lat,
 			LocationOfficeLon: locOffice.lon,
 			LocationHomeLat:   locHome.lat,
@@ -615,7 +587,7 @@ func handleConfigDayOverrides(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		for _, t := range times {
-			if _, err := parseTime(t, actionIn); err != nil {
+			if err := parseTime(t); err != nil {
 				http.Redirect(w, r, "/config?day_override_error=Hora+inválida:+"+strings.ReplaceAll(t, " ", "+"), http.StatusFound)
 				return
 			}

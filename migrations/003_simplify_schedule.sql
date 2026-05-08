@@ -1,0 +1,5 @@
+ALTER TABLE user_configs
+  DROP COLUMN IF EXISTS hours_in,
+  DROP COLUMN IF EXISTS hours_out,
+  DROP COLUMN IF EXISTS weekend,
+  DROP COLUMN IF EXISTS headless;

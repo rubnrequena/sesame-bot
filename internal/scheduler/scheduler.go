@@ -26,22 +26,14 @@ type Scheduler struct {
 	pool         *pgxpool.Pool
 	encKey       []byte
 	MemPasswords sync.Map // map[userID string] -> plaintext password
-	runAction    func(userID, email, password string, headless, weekend bool,
-		hoursIn, hoursOut, officeDays string,
-		offLat, offLon, homeLat, homeLon float64,
-		overrides []models.DayOverride,
-		action string,
-		scheduledAt time.Time,
-	) error
+	runAction    RunActionFn
 }
 
 // RunActionFn is the type of the function provided by main to do the actual browser automation.
 type RunActionFn func(
 	userID, email, password string,
-	headless, weekend bool,
-	hoursIn, hoursOut, officeDays string,
+	officeDays string,
 	offLat, offLon, homeLat, homeLon float64,
-	overrides []models.DayOverride,
 	action string,
 	scheduledAt time.Time,
 ) error
@@ -103,17 +95,15 @@ func (s *Scheduler) Run(ctx context.Context) {
 				if now.Hour() == st.hour && now.Minute() == st.minute {
 					executed[uid][key] = true
 					c := uw.Config
-					overrides := uw.DayOverrides
 					action := st.action
 					scheduledAt := now
 					go func(uid, email, pw string) {
 						err := s.runAction(
 							uid, email, pw,
-							c.Headless, c.Weekend,
-							c.HoursIn, c.HoursOut, c.OfficeDays,
+							c.OfficeDays,
 							c.LocationOfficeLat, c.LocationOfficeLon,
 							c.LocationHomeLat, c.LocationHomeLon,
-							overrides, action, scheduledAt,
+							action, scheduledAt,
 						)
 						status, msg := "ok", ""
 						if err != nil {
@@ -163,39 +153,27 @@ type scheduledEntry struct {
 	action string
 }
 
+// buildSchedule returns the scheduled entries for the given day using only day_overrides.
+// Days without an override are inactive (return nil).
 func buildSchedule(uw models.UserWithConfig, day time.Weekday) []scheduledEntry {
-	isWeekend := day == time.Saturday || day == time.Sunday
-	if isWeekend && !uw.Config.Weekend {
-		return nil
-	}
-
-	inTimes := splitCSV(uw.Config.HoursIn)
-	outTimes := splitCSV(uw.Config.HoursOut)
-
-	// Apply day overrides
 	for _, o := range uw.DayOverrides {
-		if time.Weekday(o.Weekday) == day {
-			if o.HoursIn != "" {
-				inTimes = splitCSV(o.HoursIn)
+		if time.Weekday(o.Weekday) != day {
+			continue
+		}
+		var entries []scheduledEntry
+		for _, raw := range splitCSV(o.HoursIn) {
+			if h, m, ok := parseHHMM(raw); ok {
+				entries = append(entries, scheduledEntry{h, m, "IN"})
 			}
-			if o.HoursOut != "" {
-				outTimes = splitCSV(o.HoursOut)
+		}
+		for _, raw := range splitCSV(o.HoursOut) {
+			if h, m, ok := parseHHMM(raw); ok {
+				entries = append(entries, scheduledEntry{h, m, "OUT"})
 			}
 		}
+		return entries
 	}
-
-	var entries []scheduledEntry
-	for _, raw := range inTimes {
-		if h, m, ok := parseHHMM(raw); ok {
-			entries = append(entries, scheduledEntry{h, m, "IN"})
-		}
-	}
-	for _, raw := range outTimes {
-		if h, m, ok := parseHHMM(raw); ok {
-			entries = append(entries, scheduledEntry{h, m, "OUT"})
-		}
-	}
-	return entries
+	return nil // día sin override = inactivo
 }
 
 func splitCSV(s string) []string {

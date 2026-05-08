@@ -11,8 +11,7 @@ import (
 func GetUserConfig(ctx context.Context, pool *pgxpool.Pool, userID string) (*models.UserConfig, error) {
 	c := &models.UserConfig{}
 	err := pool.QueryRow(ctx,
-		`SELECT id, user_id, sesame_email, sesame_password_enc, headless, weekend,
-		        hours_in, hours_out,
+		`SELECT id, user_id, sesame_email, sesame_password_enc,
 		        location_office_lat, location_office_lon,
 		        location_home_lat, location_home_lon,
 		        office_days, created_at, updated_at
@@ -20,8 +19,6 @@ func GetUserConfig(ctx context.Context, pool *pgxpool.Pool, userID string) (*mod
 		userID,
 	).Scan(
 		&c.ID, &c.UserID, &c.SesameEmail, &c.SesamePasswordEnc,
-		&c.Headless, &c.Weekend,
-		&c.HoursIn, &c.HoursOut,
 		&c.LocationOfficeLat, &c.LocationOfficeLon,
 		&c.LocationHomeLat, &c.LocationHomeLon,
 		&c.OfficeDays, &c.CreatedAt, &c.UpdatedAt,
@@ -34,19 +31,14 @@ func GetUserConfig(ctx context.Context, pool *pgxpool.Pool, userID string) (*mod
 
 func UpsertUserConfig(ctx context.Context, pool *pgxpool.Pool, c *models.UserConfig) error {
 	_, err := pool.Exec(ctx,
-		`INSERT INTO user_configs(user_id, sesame_email, sesame_password_enc, headless, weekend,
-		    hours_in, hours_out,
+		`INSERT INTO user_configs(user_id, sesame_email, sesame_password_enc,
 		    location_office_lat, location_office_lon,
 		    location_home_lat, location_home_lon,
 		    office_days, updated_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW())
 		 ON CONFLICT(user_id) DO UPDATE SET
 		    sesame_email         = EXCLUDED.sesame_email,
 		    sesame_password_enc  = EXCLUDED.sesame_password_enc,
-		    headless             = EXCLUDED.headless,
-		    weekend              = EXCLUDED.weekend,
-		    hours_in             = EXCLUDED.hours_in,
-		    hours_out            = EXCLUDED.hours_out,
 		    location_office_lat  = EXCLUDED.location_office_lat,
 		    location_office_lon  = EXCLUDED.location_office_lon,
 		    location_home_lat    = EXCLUDED.location_home_lat,
@@ -54,8 +46,6 @@ func UpsertUserConfig(ctx context.Context, pool *pgxpool.Pool, c *models.UserCon
 		    office_days          = EXCLUDED.office_days,
 		    updated_at           = NOW()`,
 		c.UserID, c.SesameEmail, c.SesamePasswordEnc,
-		c.Headless, c.Weekend,
-		c.HoursIn, c.HoursOut,
 		c.LocationOfficeLat, c.LocationOfficeLon,
 		c.LocationHomeLat, c.LocationHomeLon,
 		c.OfficeDays,

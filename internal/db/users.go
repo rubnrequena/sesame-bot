@@ -101,8 +101,7 @@ func ToggleUserActive(ctx context.Context, pool *pgxpool.Pool, id string) error 
 func LoadActiveUsersWithConfig(ctx context.Context, pool *pgxpool.Pool) ([]models.UserWithConfig, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT u.id, u.email, u.is_admin, u.is_active, u.created_at, u.updated_at,
-		        c.id, c.sesame_email, c.sesame_password_enc, c.headless, c.weekend,
-		        c.hours_in, c.hours_out,
+		        c.id, c.sesame_email, c.sesame_password_enc,
 		        c.location_office_lat, c.location_office_lon,
 		        c.location_home_lat, c.location_home_lon,
 		        c.office_days
@@ -110,9 +109,7 @@ func LoadActiveUsersWithConfig(ctx context.Context, pool *pgxpool.Pool) ([]model
 		 JOIN user_configs c ON c.user_id = u.id
 		 WHERE u.is_active = TRUE
 		   AND u.is_approved = TRUE
-		   AND c.sesame_email != ''
-		   AND c.hours_in != ''
-		   AND c.hours_out != ''`)
+		   AND c.sesame_email != ''`)
 	if err != nil {
 		return nil, err
 	}
@@ -125,8 +122,7 @@ func LoadActiveUsersWithConfig(ctx context.Context, pool *pgxpool.Pool) ([]model
 		c := &uw.Config
 		if err := rows.Scan(
 			&u.ID, &u.Email, &u.IsAdmin, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
-			&c.ID, &c.SesameEmail, &c.SesamePasswordEnc, &c.Headless, &c.Weekend,
-			&c.HoursIn, &c.HoursOut,
+			&c.ID, &c.SesameEmail, &c.SesamePasswordEnc,
 			&c.LocationOfficeLat, &c.LocationOfficeLon,
 			&c.LocationHomeLat, &c.LocationHomeLon,
 			&c.OfficeDays,
