@@ -84,6 +84,9 @@
           <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
             <button type="button" class="btn btn-sm btn-ghost" onclick="doOpenModal({{.Weekday}},'{{.Name}}')">+ Añadir hora</button>
             <button type="submit" class="btn btn-sm" id="save-{{.Weekday}}" disabled>Guardar</button>
+            <button type="button" class="btn btn-sm btn-ghost" id="copy-{{.Weekday}}" style="display:none;padding:.4rem .55rem" title="Copiar horarios a otros días" onclick="doCopyOpen({{.Weekday}})">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
             <button type="button" class="btn btn-sm btn-danger" id="del-{{.Weekday}}" style="display:none" onclick="doDeleteOverride({{.Weekday}})">Borrar override</button>
           </div>
         </form>
@@ -104,6 +107,23 @@
         <div style="display:flex;gap:.75rem;margin-top:1.5rem">
           <button class="btn" onclick="doConfirmHour()" style="flex:1">Confirmar</button>
           <button class="btn btn-ghost" onclick="doCloseModal()" style="flex:1">Cancelar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal copiar a otros días -->
+    <div id="do-copy-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:18px;padding:2rem;width:min(320px,90vw);box-shadow:0 8px 40px rgba(0,0,0,.18)">
+        <h3 style="margin:0 0 .25rem;font-size:1.05rem;font-weight:600;letter-spacing:-.02em">Copiar horarios a…</h3>
+        <p id="do-copy-subtitle" style="margin:0 0 1.1rem;font-size:.8rem;color:#aeaeb2"></p>
+        <div id="do-copy-days" style="display:flex;flex-direction:column;gap:.15rem"></div>
+        <label style="display:flex;align-items:center;gap:.5rem;margin-top:.85rem;text-transform:none;letter-spacing:0;font-size:.825rem;color:#6e6e73;font-weight:400;cursor:pointer;border-top:1.5px solid #f0f0f5;padding-top:.85rem">
+          <input type="checkbox" id="do-copy-all" onchange="doCopyToggleAll(this.checked)" style="width:auto;margin:0;accent-color:#0071e3">
+          Seleccionar todos
+        </label>
+        <div style="display:flex;gap:.75rem;margin-top:1.25rem">
+          <button class="btn" id="do-copy-confirm-btn" onclick="doCopyConfirm()" style="flex:1">Copiar</button>
+          <button class="btn btn-ghost" onclick="doCopyClose()" style="flex:1">Cancelar</button>
         </div>
       </div>
     </div>
@@ -194,6 +214,8 @@ function toggleAcc(wd) {
 var _dow = {};
 var _dowHasServer = {};
 var _modalWd = null;
+var _copySourceWd = null;
+var _allDays = [{{range .DayOverrides}}{wd:{{.Weekday}},name:"{{.Name}}"},{{end}}];
 
 function _doInit(wd, hoursStr) {
   _dow[wd] = hoursStr ? hoursStr.split(',').filter(function(s){ return s.trim() !== ''; }) : [];
@@ -226,9 +248,12 @@ function _doRender(wd) {
       container.appendChild(pill);
     });
   }
+  var valid = hours.length >= 2 && hours.length % 2 === 0;
   document.getElementById('hours-' + wd).value = hours.join(',');
-  if (saveBtn) saveBtn.disabled = !(hours.length >= 2 && hours.length % 2 === 0);
+  if (saveBtn) saveBtn.disabled = !valid;
   if (delBtn) delBtn.style.display = (_dowHasServer[wd] || hours.length > 0) ? '' : 'none';
+  var copyBtn = document.getElementById('copy-' + wd);
+  if (copyBtn) copyBtn.style.display = valid ? '' : 'none';
   // update accordion status
   var statusEl = document.getElementById('acc-status-' + wd);
   if (statusEl) {
@@ -312,12 +337,96 @@ function doDeleteOverride(wd) {
 document.getElementById('do-modal').addEventListener('click', function(e) {
   if (e.target === this) doCloseModal();
 });
+document.getElementById('do-copy-modal').addEventListener('click', function(e) {
+  if (e.target === this) doCopyClose();
+});
 document.addEventListener('keydown', function(e) {
   if (_modalWd !== null) {
     if (e.key === 'Enter') { e.preventDefault(); doConfirmHour(); }
     if (e.key === 'Escape') doCloseModal();
   }
+  if (_copySourceWd !== null && e.key === 'Escape') doCopyClose();
 });
+
+function doCopyOpen(wd) {
+  if (!(_dow[wd] && _dow[wd].length >= 2 && _dow[wd].length % 2 === 0)) return;
+  _copySourceWd = wd;
+  var sourceName = '';
+  var container = document.getElementById('do-copy-days');
+  container.innerHTML = '';
+  _allDays.forEach(function(d) {
+    if (d.wd === wd) { sourceName = d.name; return; }
+    var label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:.5rem;cursor:pointer;text-transform:none;letter-spacing:0;font-size:.9rem;color:#1d1d1f;font-weight:400;margin:0;padding:.3rem .1rem';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.value = d.wd;
+    cb.style.cssText = 'width:auto;margin:0;accent-color:#0071e3;flex-shrink:0';
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(d.name));
+    container.appendChild(label);
+  });
+  document.getElementById('do-copy-subtitle').textContent = 'Desde: ' + sourceName;
+  document.getElementById('do-copy-all').checked = false;
+  document.getElementById('do-copy-modal').style.display = 'flex';
+}
+
+function doCopyClose() {
+  document.getElementById('do-copy-modal').style.display = 'none';
+  _copySourceWd = null;
+}
+
+function doCopyToggleAll(checked) {
+  document.querySelectorAll('#do-copy-days input[type=checkbox]').forEach(function(cb) {
+    cb.checked = checked;
+  });
+}
+
+function doCopyConfirm() {
+  if (_copySourceWd === null) return;
+  var sourceHours = (_dow[_copySourceWd] || []).slice();
+
+  var targets = [];
+  document.querySelectorAll('#do-copy-days input[type=checkbox]:checked').forEach(function(cb) {
+    targets.push(parseInt(cb.value, 10));
+  });
+  if (targets.length === 0) { doCopyClose(); return; }
+
+  // Update UI immediately
+  targets.forEach(function(wd) {
+    _dow[wd] = sourceHours.slice();
+    _doRender(wd);
+  });
+
+  // Persist all days in parallel
+  var confirmBtn = document.getElementById('do-copy-confirm-btn');
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = 'Guardando…';
+
+  Promise.all(targets.map(function(wd) {
+    var body = new URLSearchParams();
+    body.set('weekday', wd);
+    body.set('hours', sourceHours.join(','));
+    return fetch('/config/day-overrides', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: body.toString()
+    });
+  })).then(function(responses) {
+    var failed = responses.filter(function(r) { return !r.ok && !r.redirected; });
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = 'Copiar';
+    if (failed.length > 0) {
+      alert('Error al guardar ' + failed.length + ' día(s). Comprueba la conexión e inténtalo de nuevo.');
+      return;
+    }
+    targets.forEach(function(wd) { _dowHasServer[wd] = true; _doRender(wd); });
+    doCopyClose();
+  }).catch(function() {
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = 'Copiar';
+    alert('Error de red. Inténtalo de nuevo.');
+  });
+}
 
 // Init server data
 {{range .DayOverrides}}
