@@ -83,11 +83,18 @@
           <input type="hidden" name="hours" id="hours-{{.Weekday}}" value="">
           <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
             <button type="button" class="btn btn-sm btn-ghost" onclick="doOpenModal({{.Weekday}},'{{.Name}}')">+ Añadir hora</button>
-            <button type="submit" class="btn btn-sm" id="save-{{.Weekday}}" disabled>Guardar</button>
-            <button type="button" class="btn btn-sm btn-ghost" id="copy-{{.Weekday}}" style="display:none;padding:.4rem .55rem" title="Copiar horarios a otros días" onclick="doCopyOpen({{.Weekday}})">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <button type="submit" class="btn btn-sm" id="save-{{.Weekday}}" disabled style="display:inline-flex;align-items:center;gap:.35rem" title="Guardar">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              <span class="btn-label">Guardar</span>
             </button>
-            <button type="button" class="btn btn-sm btn-danger" id="del-{{.Weekday}}" style="display:none" onclick="doDeleteOverride({{.Weekday}})">Borrar override</button>
+            <button type="button" class="btn btn-sm btn-ghost" id="copy-{{.Weekday}}" style="display:none;align-items:center;gap:.35rem" title="Copiar horarios a otros días" onclick="doCopyOpen({{.Weekday}})">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span class="btn-label">Copiar</span>
+            </button>
+            <button type="button" class="btn btn-sm btn-danger" id="del-{{.Weekday}}" style="display:none;align-items:center;gap:.35rem" title="Borrar override" onclick="doDeleteOverride({{.Weekday}})">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              <span class="btn-label">Eliminar</span>
+            </button>
           </div>
         </form>
       </div>
@@ -251,9 +258,9 @@ function _doRender(wd) {
   var valid = hours.length >= 2 && hours.length % 2 === 0;
   document.getElementById('hours-' + wd).value = hours.join(',');
   if (saveBtn) saveBtn.disabled = !valid;
-  if (delBtn) delBtn.style.display = (_dowHasServer[wd] || hours.length > 0) ? '' : 'none';
+  if (delBtn) delBtn.style.display = (_dowHasServer[wd] || hours.length > 0) ? 'inline-flex' : 'none';
   var copyBtn = document.getElementById('copy-' + wd);
-  if (copyBtn) copyBtn.style.display = valid ? '' : 'none';
+  if (copyBtn) copyBtn.style.display = valid ? 'inline-flex' : 'none';
   // update accordion status
   var statusEl = document.getElementById('acc-status-' + wd);
   if (statusEl) {
