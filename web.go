@@ -247,20 +247,39 @@ type dayOption struct {
 	Selected bool
 }
 
+type dayOverrideUI struct {
+	Weekday int
+	Name    string
+	Hours   string // interleaved CSV: "09:00,14:00,15:00,18:00"
+}
+
+var dayNamesES = map[time.Weekday]string{
+	time.Monday:    "Lunes",
+	time.Tuesday:   "Martes",
+	time.Wednesday: "Miércoles",
+	time.Thursday:  "Jueves",
+	time.Friday:    "Viernes",
+	time.Saturday:  "Sábado",
+	time.Sunday:    "Domingo",
+}
+
 func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFunc {
 	type data struct {
-		User              *models.User
-		Cfg               *models.UserConfig
-		LocationOffice    string
-		LocationHome      string
-		AllDays           []dayOption
-		Success           bool
-		Error             string
-		PwSuccess         bool
-		PwError           string
-		PwMode            string
-		AccountPwSuccess  bool
-		AccountPwError    string
+		User               *models.User
+		Cfg                *models.UserConfig
+		LocationOffice     string
+		LocationHome       string
+		AllDays            []dayOption
+		DayOverrides       []dayOverrideUI
+		Success            bool
+		Error              string
+		PwSuccess          bool
+		PwError            string
+		PwMode             string
+		AccountPwSuccess   bool
+		AccountPwError     string
+		DayOverrideSuccess bool
+		DayOverrideError   string
 	}
 
 	tmpl := parseTemplates("config.html")
@@ -280,24 +299,45 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 			})
 		}
 
+		existingOverrides, _ := appdb.GetDayOverrides(r.Context(), pool, user.ID)
+		overridesMap := make(map[int]models.DayOverride)
+		for _, o := range existingOverrides {
+			overridesMap[o.Weekday] = o
+		}
+		var dayOverridesList []dayOverrideUI
+		for _, wd := range []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday, time.Saturday, time.Sunday} {
+			hours := ""
+			if o, ok := overridesMap[int(wd)]; ok {
+				hours = interleaveHours(o.HoursIn, o.HoursOut)
+			}
+			dayOverridesList = append(dayOverridesList, dayOverrideUI{
+				Weekday: int(wd),
+				Name:    dayNamesES[wd],
+				Hours:   hours,
+			})
+		}
+
 		pwMode := "db"
 		if _, inMem := sched.MemPasswords.Load(user.ID); inMem {
 			pwMode = "memory"
 		}
 
 		return data{
-			User:             user,
-			Cfg:              cfg,
-			LocationOffice:   locationToStr(cfg.LocationOfficeLat, cfg.LocationOfficeLon),
-			LocationHome:     locationToStr(cfg.LocationHomeLat, cfg.LocationHomeLon),
-			AllDays:          allDays,
-			Success:          success,
-			Error:            errMsg,
-			PwSuccess:        pwSuccess,
-			PwError:          pwErr,
-			PwMode:           pwMode,
-			AccountPwSuccess: r.URL.Query().Get("account_pw_success") == "1",
-			AccountPwError:   r.URL.Query().Get("account_pw_error"),
+			User:               user,
+			Cfg:                cfg,
+			LocationOffice:     locationToStr(cfg.LocationOfficeLat, cfg.LocationOfficeLon),
+			LocationHome:       locationToStr(cfg.LocationHomeLat, cfg.LocationHomeLon),
+			AllDays:            allDays,
+			DayOverrides:       dayOverridesList,
+			Success:            success,
+			Error:              errMsg,
+			PwSuccess:          pwSuccess,
+			PwError:            pwErr,
+			PwMode:             pwMode,
+			AccountPwSuccess:   r.URL.Query().Get("account_pw_success") == "1",
+			AccountPwError:     r.URL.Query().Get("account_pw_error"),
+			DayOverrideSuccess: r.URL.Query().Get("day_override_success") == "1",
+			DayOverrideError:   r.URL.Query().Get("day_override_error"),
 		}
 	}
 
@@ -526,6 +566,76 @@ func handleConfigAccountPassword(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		redirect("")
+	}
+}
+
+// ─── Day overrides ────────────────────────────────────────────────────────────
+
+func handleConfigDayOverrides(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
+		if !user.IsApproved {
+			http.Redirect(w, r, "/config?day_override_error=Cuenta+pendiente+de+aprobación", http.StatusFound)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Redirect(w, r, "/config?day_override_error=Error+al+parsear+formulario", http.StatusFound)
+			return
+		}
+
+		weekdayStr := r.FormValue("weekday")
+		hours := strings.TrimSpace(r.FormValue("hours"))
+
+		weekday, err := strconv.Atoi(weekdayStr)
+		if err != nil || weekday < 0 || weekday > 6 {
+			http.Redirect(w, r, "/config?day_override_error=Día+inválido", http.StatusFound)
+			return
+		}
+
+		if hours == "" {
+			if err := appdb.DeleteDayOverride(r.Context(), pool, user.ID, weekday); err != nil {
+				log.Printf("handleConfigDayOverrides delete: %v", err)
+			}
+			http.Redirect(w, r, "/config?day_override_success=1", http.StatusFound)
+			return
+		}
+
+		times := splitTimes(hours)
+		if len(times) < 2 || len(times)%2 != 0 {
+			http.Redirect(w, r, "/config?day_override_error=El+número+de+horas+debe+ser+par+y+al+menos+2", http.StatusFound)
+			return
+		}
+
+		for _, t := range times {
+			if _, err := parseTime(t, actionIn); err != nil {
+				http.Redirect(w, r, "/config?day_override_error=Hora+inválida:+"+strings.ReplaceAll(t, " ", "+"), http.StatusFound)
+				return
+			}
+		}
+
+		var ins, outs []string
+		for i, t := range times {
+			if i%2 == 0 {
+				ins = append(ins, t)
+			} else {
+				outs = append(outs, t)
+			}
+		}
+
+		override := &models.DayOverride{
+			UserID:   user.ID,
+			Weekday:  weekday,
+			HoursIn:  strings.Join(ins, ","),
+			HoursOut: strings.Join(outs, ","),
+		}
+
+		if err := appdb.UpsertDayOverride(r.Context(), pool, override); err != nil {
+			log.Printf("handleConfigDayOverrides upsert: %v", err)
+			http.Redirect(w, r, "/config?day_override_error=Error+guardando+el+override", http.StatusFound)
+			return
+		}
+
+		http.Redirect(w, r, "/config?day_override_success=1", http.StatusFound)
 	}
 }
 
@@ -845,6 +955,7 @@ func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 	mux.HandleFunc("/config", requireAuth(pool, handleConfig(pool, sched)))
 	mux.HandleFunc("/config/password", requireAuth(pool, handleConfigPassword(pool, sched)))
 	mux.HandleFunc("/config/account-password", requireAuth(pool, handleConfigAccountPassword(pool)))
+	mux.HandleFunc("/config/day-overrides", requireAuth(pool, handleConfigDayOverrides(pool)))
 	mux.HandleFunc("/logs", requireAuth(pool, handleLogs(pool)))
 
 	mux.HandleFunc("/admin", requireAdmin(pool, handleAdmin(pool)))
@@ -902,6 +1013,25 @@ func locationToStr(lat, lon float64) string {
 		return ""
 	}
 	return strconv.FormatFloat(lat, 'f', -1, 64) + "," + strconv.FormatFloat(lon, 'f', -1, 64)
+}
+
+func interleaveHours(hoursIn, hoursOut string) string {
+	ins := splitTimes(hoursIn)
+	outs := splitTimes(hoursOut)
+	n := len(ins)
+	if len(outs) > n {
+		n = len(outs)
+	}
+	combined := make([]string, 0, n*2)
+	for i := 0; i < n; i++ {
+		if i < len(ins) {
+			combined = append(combined, ins[i])
+		}
+		if i < len(outs) {
+			combined = append(combined, outs[i])
+		}
+	}
+	return strings.Join(combined, ",")
 }
 
 func titleCase(s string) string {

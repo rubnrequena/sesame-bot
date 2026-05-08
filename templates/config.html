@@ -66,6 +66,61 @@
   </form>
 
   <hr class="section-divider">
+  <h2>Horarios por día <span class="hint">(sobreescribe el horario general para días concretos)</span></h2>
+  {{if .DayOverrideSuccess}}<div class="flash-ok">Override de día guardado correctamente.</div>{{end}}
+  {{if .DayOverrideError}}<div class="flash-err">{{.DayOverrideError}}</div>{{end}}
+
+  <p style="font-size:.825rem;color:#6e6e73;margin:.25rem 0 1rem;line-height:1.6">
+    Las horas alternan entrada/salida por posición:
+    <span style="background:#e8f9ee;color:#1a7f4b;padding:.15rem .55rem;border-radius:12px;font-weight:600;font-size:.78rem">entrada</span>
+    <span style="background:#f5f5f7;color:#6e6e73;padding:.15rem .55rem;border-radius:12px;font-weight:600;font-size:.78rem">salida</span>
+    <span style="background:#e8f9ee;color:#1a7f4b;padding:.15rem .55rem;border-radius:12px;font-weight:600;font-size:.78rem">entrada</span>
+    <span style="background:#f5f5f7;color:#6e6e73;padding:.15rem .55rem;border-radius:12px;font-weight:600;font-size:.78rem">salida</span>
+    — el total siempre debe ser par.
+  </p>
+
+  {{range .DayOverrides}}
+  <div style="border:1.5px solid #f0f0f5;border-radius:12px;padding:.9rem 1.1rem;margin-top:.5rem">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem">
+      <span style="font-weight:600;font-size:.95rem">{{.Name}}</span>
+      <button type="button" class="btn btn-sm btn-ghost" onclick="doOpenModal({{.Weekday}},'{{.Name}}')">+ Añadir hora</button>
+    </div>
+    <div id="pills-{{.Weekday}}" style="min-height:1.8rem;display:flex;flex-wrap:wrap;align-items:center;gap:.3rem">
+      <span id="empty-{{.Weekday}}" style="font-size:.8rem;color:#aeaeb2">Sin override — usa el horario general</span>
+    </div>
+    <form method="POST" action="/config/day-overrides" id="form-{{.Weekday}}" style="margin-top:.65rem">
+      <input type="hidden" name="weekday" value="{{.Weekday}}">
+      <input type="hidden" name="hours" id="hours-{{.Weekday}}" value="">
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+        <button type="submit" class="btn btn-sm" id="save-{{.Weekday}}" disabled>Guardar</button>
+        <button type="button" class="btn btn-sm btn-danger" id="del-{{.Weekday}}" style="display:none" onclick="doDeleteOverride({{.Weekday}})">Borrar override</button>
+      </div>
+    </form>
+  </div>
+  {{end}}
+
+  <!-- Day overrides modal -->
+  <div id="do-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center">
+    <div style="background:#fff;border-radius:18px;padding:2rem;width:min(320px,90vw);box-shadow:0 8px 40px rgba(0,0,0,.18)">
+      <h3 id="do-modal-title" style="margin:0 0 1.25rem;font-size:1.05rem;font-weight:600;letter-spacing:-.02em"></h3>
+      <div style="display:flex;gap:.75rem">
+        <label style="flex:1;margin-top:0">
+          Hora
+          <input type="number" id="do-hour" min="0" max="23" placeholder="9" style="margin-top:.35rem">
+        </label>
+        <label style="flex:1;margin-top:0">
+          Minutos
+          <input type="number" id="do-min" min="0" max="59" placeholder="00" style="margin-top:.35rem">
+        </label>
+      </div>
+      <div style="display:flex;gap:.75rem;margin-top:1.5rem">
+        <button class="btn" onclick="doConfirmHour()" style="flex:1">Confirmar</button>
+        <button class="btn btn-ghost" onclick="doCloseModal()" style="flex:1">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <hr class="section-divider">
   <h2>Cambiar contraseña de acceso</h2>
   {{if .AccountPwSuccess}}<div class="flash-ok">Contraseña de acceso actualizada correctamente.</div>{{end}}
   {{if .AccountPwError}}<div class="flash-err">{{.AccountPwError}}</div>{{end}}
@@ -131,6 +186,112 @@
   </form>
 </div>
 <script>
+// ── Day overrides ──────────────────────────────────────────────────────────────
+var _dow = {};
+var _modalWd = null;
+var _dowHasServer = {};
+
+function _doInit(wd, hoursStr) {
+  _dow[wd] = hoursStr ? hoursStr.split(',').filter(function(s){ return s.trim() !== ''; }) : [];
+  _doRender(wd);
+}
+
+function _doRender(wd) {
+  var container = document.getElementById('pills-' + wd);
+  var emptyMsg  = document.getElementById('empty-' + wd);
+  var saveBtn   = document.getElementById('save-' + wd);
+  var delBtn    = document.getElementById('del-' + wd);
+  if (!container) return;
+
+  var hours = _dow[wd] || [];
+  container.innerHTML = '';
+
+  if (hours.length === 0) {
+    container.appendChild(emptyMsg);
+  } else {
+    hours.forEach(function(t, i) {
+      var isIn = i % 2 === 0;
+      var pill = document.createElement('span');
+      pill.style.cssText = 'display:inline-flex;align-items:center;gap:.25rem;padding:.25rem .65rem;border-radius:20px;font-size:.825rem;font-weight:600;' +
+        (isIn ? 'background:#e8f9ee;color:#1a7f4b;' : 'background:#f5f5f7;color:#6e6e73;');
+      var label = document.createElement('span');
+      label.textContent = t;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = '×';
+      btn.title = 'Eliminar';
+      btn.style.cssText = 'background:none;border:none;padding:0 0 0 .1rem;cursor:pointer;color:inherit;font-size:1rem;line-height:1;opacity:.65;';
+      btn.addEventListener('click', (function(w, idx){ return function(){ _doRemove(w, idx); }; })(wd, i));
+      pill.appendChild(label);
+      pill.appendChild(btn);
+      container.appendChild(pill);
+    });
+  }
+
+  document.getElementById('hours-' + wd).value = hours.join(',');
+  var valid = hours.length >= 2 && hours.length % 2 === 0;
+  if (saveBtn) saveBtn.disabled = !valid;
+  if (delBtn) delBtn.style.display = (_dowHasServer[wd] || hours.length > 0) ? '' : 'none';
+}
+
+function doOpenModal(wd, name) {
+  _modalWd = wd;
+  document.getElementById('do-modal-title').textContent = 'Añadir hora — ' + name;
+  document.getElementById('do-hour').value = '';
+  document.getElementById('do-min').value = '00';
+  var modal = document.getElementById('do-modal');
+  modal.style.display = 'flex';
+  setTimeout(function(){ document.getElementById('do-hour').focus(); }, 50);
+}
+
+function doCloseModal() {
+  document.getElementById('do-modal').style.display = 'none';
+  _modalWd = null;
+}
+
+function doConfirmHour() {
+  var h = parseInt(document.getElementById('do-hour').value, 10);
+  var m = parseInt(document.getElementById('do-min').value || '0', 10);
+  if (isNaN(h) || h < 0 || h > 23) { alert('Hora inválida (0–23)'); return; }
+  if (isNaN(m) || m < 0 || m > 59) { alert('Minutos inválidos (0–59)'); return; }
+  var time = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+  if (!_dow[_modalWd]) _dow[_modalWd] = [];
+  _dow[_modalWd].push(time);
+  _doRender(_modalWd);
+  doCloseModal();
+}
+
+function _doRemove(wd, idx) {
+  _dow[wd].splice(idx, 1);
+  _doRender(wd);
+}
+
+function doDeleteOverride(wd) {
+  if (!confirm('¿Eliminar el override de este día y volver al horario general?')) return;
+  _dow[wd] = [];
+  _dowHasServer[wd] = false;
+  document.getElementById('hours-' + wd).value = '';
+  document.getElementById('form-' + wd).submit();
+}
+
+document.getElementById('do-modal').addEventListener('click', function(e) {
+  if (e.target === this) doCloseModal();
+});
+
+document.addEventListener('keydown', function(e) {
+  if (_modalWd !== null) {
+    if (e.key === 'Enter') { e.preventDefault(); doConfirmHour(); }
+    if (e.key === 'Escape') doCloseModal();
+  }
+});
+
+// Init from server-rendered data
+{{range .DayOverrides}}
+_dowHasServer[{{.Weekday}}] = {{if .Hours}}true{{else}}false{{end}};
+_doInit({{.Weekday}}, "{{.Hours}}");
+{{end}}
+// ── End day overrides ──────────────────────────────────────────────────────────
+
 function togglePw(id, showId, hideId) {
   var inp = document.getElementById(id);
   var show = document.getElementById(showId);
