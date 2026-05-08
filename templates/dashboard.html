@@ -9,25 +9,17 @@
   {{end}}
 
   {{if .Config.SesameEmail}}
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem">
-    <div style="background:#f5f5f7;border-radius:12px;padding:1rem 1.25rem">
-      <div style="font-size:.75rem;color:#6e6e73;text-transform:uppercase;letter-spacing:.05em;font-weight:600">Cuenta Sesame</div>
-      <div style="margin-top:.35rem;font-weight:500">{{.Config.SesameEmail}}</div>
+  <div class="stats-grid">
+    <div class="stat-box">
+      <div class="stat-label">Cuenta Sesame</div>
+      <div class="stat-value">{{.Config.SesameEmail}}</div>
     </div>
-    <div style="background:#f5f5f7;border-radius:12px;padding:1rem 1.25rem">
-      <div style="font-size:.75rem;color:#6e6e73;text-transform:uppercase;letter-spacing:.05em;font-weight:600">Contraseña</div>
-      <div style="margin-top:.35rem;font-weight:500">
+    <div class="stat-box">
+      <div class="stat-label">Contraseña</div>
+      <div class="stat-value">
         {{if .HasPassword}}<span class="badge badge-ok">Configurada</span>{{else}}<span class="badge badge-err">No configurada</span>{{end}}
         {{if .PasswordInMemory}}<span class="badge badge-skip" style="margin-left:.35rem">Solo en memoria</span>{{end}}
       </div>
-    </div>
-    <div style="background:#f5f5f7;border-radius:12px;padding:1rem 1.25rem">
-      <div style="font-size:.75rem;color:#6e6e73;text-transform:uppercase;letter-spacing:.05em;font-weight:600">Entrada</div>
-      <div style="margin-top:.35rem;font-weight:500">{{.Config.HoursIn}}</div>
-    </div>
-    <div style="background:#f5f5f7;border-radius:12px;padding:1rem 1.25rem">
-      <div style="font-size:.75rem;color:#6e6e73;text-transform:uppercase;letter-spacing:.05em;font-weight:600">Salida</div>
-      <div style="margin-top:.35rem;font-weight:500">{{.Config.HoursOut}}</div>
     </div>
   </div>
   {{else}}
