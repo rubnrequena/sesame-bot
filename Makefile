@@ -1,5 +1,5 @@
 IMAGE  = rubn1987/sesame-bot
-TAG    = latest
+TAG    = saas
 
 .PHONY: build push release
 

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: sesame
@@ -13,9 +13,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - sesame-net
 
   sesame-bot:
-    image: rubn1987/sesame-bot:latest
+    image: rubn1987/sesame-bot:saas
     restart: unless-stopped
     depends_on:
       postgres:
@@ -24,8 +26,11 @@ services:
       - "8080:8080"
     env_file:
       - .env
-    volumes:
-      - ./migrations:/app/migrations:ro
+    networks:
+      - sesame-net
 
 volumes:
   postgres_data:
+
+networks:
+  sesame-net:
