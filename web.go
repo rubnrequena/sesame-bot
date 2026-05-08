@@ -136,12 +136,12 @@ func handleRegister(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		token, err := appdb.CreateSession(r.Context(), pool, user.ID)
+		token, err := appdb.CreateSession(r.Context(), pool, user.ID, appdb.SessionTTLShort)
 		if err != nil {
 			http.Error(w, "Error interno", http.StatusInternalServerError)
 			return
 		}
-		setSessionCookie(w, token)
+		setSessionCookie(w, token, 86400)
 		http.Redirect(w, r, "/dashboard", http.StatusFound)
 	}
 }
@@ -170,6 +170,7 @@ func handleLogin(pool *pgxpool.Pool) http.HandlerFunc {
 
 		email := strings.TrimSpace(r.FormValue("email"))
 		password := r.FormValue("password")
+		remember := r.FormValue("remember") == "1"
 
 		user, err := appdb.GetUserByEmail(r.Context(), pool, email)
 		if err != nil || !user.IsActive {
@@ -181,12 +182,19 @@ func handleLogin(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		token, err := appdb.CreateSession(r.Context(), pool, user.ID)
+		ttl := appdb.SessionTTLShort
+		maxAge := 86400
+		if remember {
+			ttl = appdb.SessionTTLLong
+			maxAge = 30 * 86400
+		}
+
+		token, err := appdb.CreateSession(r.Context(), pool, user.ID, ttl)
 		if err != nil {
 			http.Error(w, "Error interno", http.StatusInternalServerError)
 			return
 		}
-		setSessionCookie(w, token)
+		setSessionCookie(w, token, maxAge)
 		http.Redirect(w, r, "/dashboard", http.StatusFound)
 	}
 }
@@ -997,14 +1005,14 @@ func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-func setSessionCookie(w http.ResponseWriter, token string) {
+func setSessionCookie(w http.ResponseWriter, token string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   86400,
+		MaxAge:   maxAge,
 	})
 }
 

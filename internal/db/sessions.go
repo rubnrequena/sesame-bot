@@ -11,15 +11,18 @@ import (
 	"sesame-bot/internal/models"
 )
 
-const sessionTTL = 24 * time.Hour
+const (
+	SessionTTLShort = 24 * time.Hour        // sesión normal
+	SessionTTLLong  = 30 * 24 * time.Hour   // recordar sesión
+)
 
-func CreateSession(ctx context.Context, pool *pgxpool.Pool, userID string) (string, error) {
+func CreateSession(ctx context.Context, pool *pgxpool.Pool, userID string, ttl time.Duration) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generar token: %w", err)
 	}
 	token := hex.EncodeToString(b)
-	expiresAt := time.Now().Add(sessionTTL)
+	expiresAt := time.Now().Add(ttl)
 
 	_, err := pool.Exec(ctx,
 		`INSERT INTO sessions(token, user_id, expires_at) VALUES($1,$2,$3)`,
