@@ -23,6 +23,7 @@ type UserConfig struct {
 	LocationHomeLat   float64
 	LocationHomeLon   float64
 	OfficeDays        string // "Tuesday,Thursday"
+	WhatsappNumber    string // número de teléfono para notificaciones (ej: 5491112345678)
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }

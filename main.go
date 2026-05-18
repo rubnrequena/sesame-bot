@@ -19,6 +19,7 @@ import (
 	appdb "sesame-bot/internal/db"
 	"sesame-bot/internal/crypto"
 	"sesame-bot/internal/scheduler"
+	"sesame-bot/internal/ws"
 )
 
 const (
@@ -100,7 +101,15 @@ func main() {
 		log.Fatalf("Error cargando ENCRYPTION_KEY: %v", err)
 	}
 
-	sched := scheduler.New(pool, encKey, runActionBridge)
+	wsClient := &ws.Whatsapp{
+		Token:      os.Getenv("EVOLUTION_TOKEN"),
+		Instance:   os.Getenv("EVOLUTION_INSTANCE"),
+		Name:       os.Getenv("EVOLUTION_NAME"),
+		RetryDelay: 5,
+		MaxRetries: 3,
+	}
+
+	sched := scheduler.New(pool, encKey, runActionBridge, wsClient)
 
 	go startWebServer(pool, sched)
 

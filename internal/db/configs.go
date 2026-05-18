@@ -14,14 +14,14 @@ func GetUserConfig(ctx context.Context, pool *pgxpool.Pool, userID string) (*mod
 		`SELECT id, user_id, sesame_email, sesame_password_enc,
 		        location_office_lat, location_office_lon,
 		        location_home_lat, location_home_lon,
-		        office_days, created_at, updated_at
+		        office_days, whatsapp_number, created_at, updated_at
 		 FROM user_configs WHERE user_id=$1`,
 		userID,
 	).Scan(
 		&c.ID, &c.UserID, &c.SesameEmail, &c.SesamePasswordEnc,
 		&c.LocationOfficeLat, &c.LocationOfficeLon,
 		&c.LocationHomeLat, &c.LocationHomeLon,
-		&c.OfficeDays, &c.CreatedAt, &c.UpdatedAt,
+		&c.OfficeDays, &c.WhatsappNumber, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("obtener config de usuario: %w", err)
@@ -34,8 +34,8 @@ func UpsertUserConfig(ctx context.Context, pool *pgxpool.Pool, c *models.UserCon
 		`INSERT INTO user_configs(user_id, sesame_email, sesame_password_enc,
 		    location_office_lat, location_office_lon,
 		    location_home_lat, location_home_lon,
-		    office_days, updated_at)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+		    office_days, whatsapp_number, updated_at)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
 		 ON CONFLICT(user_id) DO UPDATE SET
 		    sesame_email         = EXCLUDED.sesame_email,
 		    sesame_password_enc  = EXCLUDED.sesame_password_enc,
@@ -44,11 +44,12 @@ func UpsertUserConfig(ctx context.Context, pool *pgxpool.Pool, c *models.UserCon
 		    location_home_lat    = EXCLUDED.location_home_lat,
 		    location_home_lon    = EXCLUDED.location_home_lon,
 		    office_days          = EXCLUDED.office_days,
+		    whatsapp_number      = EXCLUDED.whatsapp_number,
 		    updated_at           = NOW()`,
 		c.UserID, c.SesameEmail, c.SesamePasswordEnc,
 		c.LocationOfficeLat, c.LocationOfficeLon,
 		c.LocationHomeLat, c.LocationHomeLon,
-		c.OfficeDays,
+		c.OfficeDays, c.WhatsappNumber,
 	)
 	return err
 }

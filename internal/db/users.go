@@ -104,7 +104,7 @@ func LoadActiveUsersWithConfig(ctx context.Context, pool *pgxpool.Pool) ([]model
 		        c.id, c.sesame_email, c.sesame_password_enc,
 		        c.location_office_lat, c.location_office_lon,
 		        c.location_home_lat, c.location_home_lon,
-		        c.office_days
+		        c.office_days, c.whatsapp_number
 		 FROM users u
 		 JOIN user_configs c ON c.user_id = u.id
 		 WHERE u.is_active = TRUE
@@ -125,7 +125,7 @@ func LoadActiveUsersWithConfig(ctx context.Context, pool *pgxpool.Pool) ([]model
 			&c.ID, &c.SesameEmail, &c.SesamePasswordEnc,
 			&c.LocationOfficeLat, &c.LocationOfficeLon,
 			&c.LocationHomeLat, &c.LocationHomeLon,
-			&c.OfficeDays,
+			&c.OfficeDays, &c.WhatsappNumber,
 		); err != nil {
 			return nil, err
 		}

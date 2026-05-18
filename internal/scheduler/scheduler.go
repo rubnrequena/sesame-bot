@@ -12,6 +12,7 @@ import (
 	"sesame-bot/internal/crypto"
 	"sesame-bot/internal/db"
 	"sesame-bot/internal/models"
+	"sesame-bot/internal/ws"
 )
 
 // ErrSkipped signals that a check-in was intentionally skipped (e.g. public holiday).
@@ -27,6 +28,7 @@ type Scheduler struct {
 	encKey       []byte
 	MemPasswords sync.Map // map[userID string] -> plaintext password
 	runAction    RunActionFn
+	wsClient     *ws.Whatsapp
 }
 
 // RunActionFn is the type of the function provided by main to do the actual browser automation.
@@ -39,8 +41,8 @@ type RunActionFn func(
 	scheduledAt time.Time,
 ) (string, error)
 
-func New(pool *pgxpool.Pool, encKey []byte, fn RunActionFn) *Scheduler {
-	return &Scheduler{pool: pool, encKey: encKey, runAction: fn}
+func New(pool *pgxpool.Pool, encKey []byte, fn RunActionFn, wsClient *ws.Whatsapp) *Scheduler {
+	return &Scheduler{pool: pool, encKey: encKey, runAction: fn, wsClient: wsClient}
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
@@ -98,7 +100,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 					c := uw.Config
 					action := st.action
 					scheduledAt := now
-					go func(uid, email, pw string) {
+					go func(uid, email, pw, whatsappNumber string) {
 						locLabel, err := s.runAction(
 							uid, email, pw,
 							c.OfficeDays,
@@ -122,7 +124,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 						if logErr := db.InsertCheckinLog(dbCtx, s.pool, uid, action, status, msg, scheduledAt); logErr != nil {
 							log.Printf("Scheduler: error guardando log: %v", logErr)
 						}
-					}(uid, c.SesameEmail, password)
+						s.sendWhatsappNotification(uid, action, status, locLabel, msg, whatsappNumber)
+					}(uid, c.SesameEmail, password, c.WhatsappNumber)
 				}
 			}
 		}
@@ -193,6 +196,35 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// sendWhatsappNotification sends a WhatsApp message to the user after a check-in attempt.
+// It is a no-op when the client is nil, the number is empty, or EVOLUTION_ENABLED != "true".
+func (s *Scheduler) sendWhatsappNotification(uid, action, status, locLabel, errMsg, whatsappNumber string) {
+	if s.wsClient == nil || whatsappNumber == "" {
+		return
+	}
+
+	actionLabel := "Entrada"
+	if action == "OUT" {
+		actionLabel = "Salida"
+	}
+
+	var text string
+	switch status {
+	case "ok":
+		text = fmt.Sprintf("✅ Fichaje de *%s* registrado\n📍 Ubicación: *%s*", actionLabel, locLabel)
+	case "error":
+		text = fmt.Sprintf("❌ Error en fichaje de *%s*\n⚠️ %s", actionLabel, errMsg)
+	case "skipped":
+		text = fmt.Sprintf("⏭️ Fichaje de *%s* omitido\n📅 %s", actionLabel, errMsg)
+	default:
+		return
+	}
+
+	if _, wsErr := s.wsClient.SendMessage(whatsappNumber, text); wsErr != nil {
+		log.Printf("Scheduler [%s]: error enviando WhatsApp: %v", uid, wsErr)
+	}
 }
 
 func parseHHMM(raw string) (int, int, bool) {

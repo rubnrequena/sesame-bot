@@ -33,6 +33,13 @@
         </label>
       </div>
 
+      <hr class="section-divider">
+      <h2>Notificaciones WhatsApp <span class="hint">(opcional)</span></h2>
+      <label>Número de WhatsApp <span class="hint">(formato internacional sin + ni espacios, ej: 34612345678)</span>
+        <input type="tel" name="whatsapp_number" value="{{.Cfg.WhatsappNumber}}"
+               placeholder="34612345678" autocomplete="off">
+      </label>
+
       <label>Días en oficina <span class="hint">(Ctrl/Cmd+click para múltiples)</span>
         <select name="office_days" multiple size="7">
           {{range .AllDays}}

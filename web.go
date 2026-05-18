@@ -382,6 +382,7 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 		locOfficeRaw := strings.TrimSpace(r.FormValue("location_office"))
 		locHomeRaw := strings.TrimSpace(r.FormValue("location_home"))
 		officeDaysSelected := r.Form["office_days"]
+		whatsappNumber := strings.TrimSpace(r.FormValue("whatsapp_number"))
 
 		if sesameEmail == "" {
 			render(w, buildData(r, user, false, "El email de Sesame es obligatorio", false, ""))
@@ -417,6 +418,7 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 			LocationHomeLat:   locHome.lat,
 			LocationHomeLon:   locHome.lon,
 			OfficeDays:        officeDaysStr,
+			WhatsappNumber:    whatsappNumber,
 		}
 
 		if err := appdb.UpsertUserConfig(r.Context(), pool, cfg); err != nil {
