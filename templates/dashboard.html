@@ -21,14 +21,6 @@
         {{if .PasswordInMemory}}<span class="badge badge-skip" style="margin-left:.35rem">Solo en memoria</span>{{end}}
       </div>
     </div>
-    <div style="background:#f5f5f7;border-radius:12px;padding:1rem 1.25rem">
-      <div style="font-size:.75rem;color:#6e6e73;text-transform:uppercase;letter-spacing:.05em;font-weight:600">Entrada</div>
-      <div style="margin-top:.35rem;font-weight:500">{{.Config.HoursIn}}</div>
-    </div>
-    <div style="background:#f5f5f7;border-radius:12px;padding:1rem 1.25rem">
-      <div style="font-size:.75rem;color:#6e6e73;text-transform:uppercase;letter-spacing:.05em;font-weight:600">Salida</div>
-      <div style="margin-top:.35rem;font-weight:500">{{.Config.HoursOut}}</div>
-    </div>
   </div>
   {{else}}
   <div class="flash-err">Configura tu cuenta de Sesame para activar el fichaje automático. <a href="/config">Ir a configuración</a></div>

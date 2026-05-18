@@ -115,7 +115,7 @@ func runActionBridge(
 	offLat, offLon, homeLat, homeLon float64,
 	action string,
 	_ time.Time,
-) error {
+) (string, error) {
 	cfg := config{
 		userID:         userID,
 		email:          email,
@@ -280,8 +280,15 @@ func startHolidayCapture(page *rod.Page, logger *log.Logger) func() []holidayEnt
 
 // ─── Browser automation ───────────────────────────────────────────────────────
 
-func runAction(cfg config, action actionType) error {
+func runAction(cfg config, action actionType) (string, error) {
 	logger := log.New(log.Writer(), fmt.Sprintf("[%s] ", cfg.userID), log.LstdFlags)
+
+	// Determine location label for the log detail field.
+	day := time.Now().Weekday()
+	locLabel := "Casa"
+	if cfg.officeDays[day] {
+		locLabel = "Oficina"
+	}
 
 	u := launcher.New().
 		Headless(cfg.headless).
@@ -297,7 +304,7 @@ func runAction(cfg config, action actionType) error {
 	// Register CDP network listener before any navigation so the SPA request is captured.
 	waitHolidays := startHolidayCapture(page, logger)
 
-	loc := getLocationForDay(cfg, time.Now().Weekday())
+	loc := getLocationForDay(cfg, day)
 	if loc.lat != 0 || loc.lon != 0 {
 		accuracy := 10.0
 		geoCmd := proto.EmulationSetGeolocationOverride{
@@ -306,7 +313,7 @@ func runAction(cfg config, action actionType) error {
 			Accuracy:  &accuracy,
 		}
 		if err := geoCmd.Call(page); err != nil {
-			return fmt.Errorf("establecer geolocalización: %w", err)
+			return "", fmt.Errorf("establecer geolocalización: %w", err)
 		}
 		permCmd := proto.BrowserGrantPermissions{
 			Permissions: []proto.BrowserPermissionType{
@@ -315,20 +322,20 @@ func runAction(cfg config, action actionType) error {
 			Origin: loginURL,
 		}
 		if err := permCmd.Call(browser); err != nil {
-			return fmt.Errorf("conceder permiso de geolocalización: %w", err)
+			return "", fmt.Errorf("conceder permiso de geolocalización: %w", err)
 		}
 		logger.Printf("Geolocalización aplicada: %.6f, %.6f", loc.lat, loc.lon)
 	}
 
 	logger.Println("Navegando al login...")
 	if err := page.Navigate(loginURL); err != nil {
-		return fmt.Errorf("navegar a login: %w", err)
+		return "", fmt.Errorf("navegar a login: %w", err)
 	}
 	if err := page.WaitLoad(); err != nil {
-		return fmt.Errorf("esperar carga login: %w", err)
+		return "", fmt.Errorf("esperar carga login: %w", err)
 	}
 	if err := doLogin(page, cfg.email, cfg.password, logger); err != nil {
-		return fmt.Errorf("login: %w", err)
+		return "", fmt.Errorf("login: %w", err)
 	}
 	logger.Println("Login exitoso")
 
@@ -340,7 +347,7 @@ func runAction(cfg config, action actionType) error {
 	for _, h := range holidays {
 		if h.Date == today {
 			logger.Printf("Día festivo detectado: %s (%s) — omitiendo fichaje", today, h.Name)
-			return fmt.Errorf("%s: %w", h.Name, scheduler.ErrSkipped)
+			return "", fmt.Errorf("%s: %w", h.Name, scheduler.ErrSkipped)
 		}
 	}
 
@@ -366,19 +373,19 @@ func runAction(cfg config, action actionType) error {
 	logger.Printf("Buscando botón %q...", buttonText)
 	btn, err := waitForElementByText(page, "span", buttonText)
 	if err != nil {
-		return fmt.Errorf("buscar botón %q: %w", buttonText, err)
+		return "", fmt.Errorf("buscar botón %q: %w", buttonText, err)
 	}
 	if err := btn.WaitVisible(); err != nil {
-		return fmt.Errorf("esperar visibilidad de botón: %w", err)
+		return "", fmt.Errorf("esperar visibilidad de botón: %w", err)
 	}
 
 	if cfg.dryRun {
 		logger.Printf("[SIMULACRO] Botón %q localizado — click omitido (DRY_RUN=true)", buttonText)
-		return nil
+		return locLabel, nil
 	}
 
 	if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("click en botón %q: %w", buttonText, err)
+		return "", fmt.Errorf("click en botón %q: %w", buttonText, err)
 	}
 	logger.Printf("Click en %q realizado. Esperando 5 segundos...", buttonText)
 
@@ -386,10 +393,10 @@ func runAction(cfg config, action actionType) error {
 
 	logger.Println("Cerrando sesión...")
 	if err := doLogout(page, logger); err != nil {
-		return fmt.Errorf("logout: %w", err)
+		return "", fmt.Errorf("logout: %w", err)
 	}
 
-	return nil
+	return locLabel, nil
 }
 
 func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {

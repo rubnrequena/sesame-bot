@@ -30,13 +30,14 @@ type Scheduler struct {
 }
 
 // RunActionFn is the type of the function provided by main to do the actual browser automation.
+// It returns a location label ("Oficina" or "Casa") and an error.
 type RunActionFn func(
 	userID, email, password string,
 	officeDays string,
 	offLat, offLon, homeLat, homeLon float64,
 	action string,
 	scheduledAt time.Time,
-) error
+) (string, error)
 
 func New(pool *pgxpool.Pool, encKey []byte, fn RunActionFn) *Scheduler {
 	return &Scheduler{pool: pool, encKey: encKey, runAction: fn}
@@ -98,14 +99,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 					action := st.action
 					scheduledAt := now
 					go func(uid, email, pw string) {
-						err := s.runAction(
+						locLabel, err := s.runAction(
 							uid, email, pw,
 							c.OfficeDays,
 							c.LocationOfficeLat, c.LocationOfficeLon,
 							c.LocationHomeLat, c.LocationHomeLon,
 							action, scheduledAt,
 						)
-						status, msg := "ok", ""
+						status, msg := "ok", locLabel
 						if err != nil {
 							if errors.Is(err, ErrSkipped) {
 								status, msg = "skipped", err.Error()
@@ -115,7 +116,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 								log.Printf("Scheduler [%s]: error %s: %v", uid, action, err)
 							}
 						} else {
-							log.Printf("Scheduler [%s]: %s completado", uid, action)
+							log.Printf("Scheduler [%s]: %s completado en %s", uid, action, locLabel)
 						}
 						dbCtx := context.Background()
 						if logErr := db.InsertCheckinLog(dbCtx, s.pool, uid, action, status, msg, scheduledAt); logErr != nil {
