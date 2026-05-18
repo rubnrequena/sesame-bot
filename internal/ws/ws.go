@@ -85,6 +85,16 @@ type Whatsapp struct {
 	MaxRetries int
 }
 
+// formatChatID normalizes a destination for the Evolution API.
+// Group IDs already end in "@g.us" and are used as-is.
+// Plain phone numbers get the "@s.whatsapp.net" suffix appended.
+func formatChatID(contactNumber string) string {
+	if strings.HasSuffix(contactNumber, "@g.us") {
+		return contactNumber
+	}
+	return contactNumber + "@s.whatsapp.net"
+}
+
 func (w *Whatsapp) baseURL() string {
 	if w.BaseURL != "" {
 		return w.BaseURL
@@ -100,7 +110,7 @@ func (w *Whatsapp) SendMessage(contactNumber string, message string) (*Response,
 	nowFormat := time.Now().Format("2006-01-02 15:04:05")
 	payloadMessage := fmt.Sprintf("[%s]\n_%s_\n%s", w.Name, nowFormat, message)
 	jsonPayload := Payload{
-		ChatId:  contactNumber,
+		ChatId:  formatChatID(contactNumber),
 		Message: payloadMessage,
 	}
 	jsonData, err := json.Marshal(jsonPayload)
@@ -117,7 +127,7 @@ func (w *Whatsapp) SendImage(contactNumber string, image string, name string, ca
 	nowFormat := time.Now().Format("2006-01-02 15:04:05")
 	payloadMessage := fmt.Sprintf("[%s]\n_%s_\n%s", w.Name, nowFormat, caption)
 	jsonPayload := ImagePayload{
-		ChatId:       contactNumber,
+		ChatId:       formatChatID(contactNumber),
 		MediaCaption: payloadMessage,
 		MediaName:    name,
 		MediaBase64:  image,
