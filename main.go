@@ -16,8 +16,8 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/joho/godotenv"
 
-	appdb "sesame-bot/internal/db"
 	"sesame-bot/internal/crypto"
+	appdb "sesame-bot/internal/db"
 	"sesame-bot/internal/scheduler"
 	"sesame-bot/internal/ws"
 )
@@ -111,7 +111,7 @@ func main() {
 
 	sched := scheduler.New(pool, encKey, runActionBridge, wsClient)
 
-	go startWebServer(pool, sched)
+	go startWebServer(pool, sched, wsClient)
 
 	sched.Run(ctx)
 }
