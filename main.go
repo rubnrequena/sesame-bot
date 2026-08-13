@@ -471,7 +471,15 @@ func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 func doLogout(page *rod.Page, logger *log.Logger) error {
 	profileBtn, err := page.Timeout(actionTimeout).Element(".headerProfileName")
 	if err != nil {
-		return fmt.Errorf("botón .headerProfileName no encontrado: %w", err)
+		logoutButton, err := page.Timeout(actionTimeout).Element("#click-admin-header-logout")
+		if err != nil {
+			return fmt.Errorf("botón .headerProfileName no encontrado: %w", err)
+		} else {
+			if err := logoutButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+				return fmt.Errorf("click en #click-admin-header-logout: %w", err)
+			}
+			return nil
+		}
 	}
 	if err := profileBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("click en .headerProfileName: %w", err)
