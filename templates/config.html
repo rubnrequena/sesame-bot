@@ -1,0 +1,506 @@
+{{template "base.html" .}}
+{{define "title"}}Sesame Bot — Configuración{{end}}
+{{define "content"}}
+<div class="card">
+  <h1>Configuración</h1>
+
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-schedule-btn" onclick="switchTab('schedule')">Cuenta</button>
+    <button class="tab-btn" id="tab-days-btn" onclick="switchTab('days')">Horarios</button>
+    <button class="tab-btn" id="tab-passwords-btn" onclick="switchTab('passwords')">Contraseñas</button>
+  </div>
+
+  <!-- ── Cuenta ──────────────────────────────────────────── -->
+  <div class="tab-panel active" id="tab-schedule">
+    {{if .Success}}<div class="flash-ok">Configuración guardada correctamente.</div>{{end}}
+    {{if .Error}}<div class="flash-err">{{.Error}}</div>{{end}}
+
+    <form method="POST" action="/config">
+      <h2>Cuenta de Sesame Time</h2>
+      <label>Email de Sesame Time
+        <input type="email" name="sesame_email" value="{{.Cfg.SesameEmail}}" required>
+      </label>
+
+      <hr class="section-divider">
+      <h2>Geolocalización <span class="hint">(opcional)</span></h2>
+
+      <div class="form-row">
+        <label>Ubicación oficina <span class="hint">(latitud,longitud)</span>
+          <input type="text" name="location_office" value="{{.LocationOffice}}">
+        </label>
+        <label>Ubicación casa <span class="hint">(latitud,longitud)</span>
+          <input type="text" name="location_home" value="{{.LocationHome}}">
+        </label>
+      </div>
+
+      <hr class="section-divider">
+      <h2>Notificaciones WhatsApp <span class="hint">(opcional)</span></h2>
+      <label>Destino WhatsApp <span class="hint">(número internacional sin + ni espacios, ej: 34612345678 — o ID de grupo terminado en @g.us)</span>
+        <input type="text" name="whatsapp_number" value="{{.Cfg.WhatsappNumber}}"
+               placeholder="34612345678 o 120363XXXX@g.us" autocomplete="off">
+      </label>
+
+      <label>Días en oficina <span class="hint">(Ctrl/Cmd+click para múltiples)</span>
+        <select name="office_days" multiple size="7">
+          {{range .AllDays}}
+          <option value="{{.Name}}"{{if .Selected}} selected{{end}}>{{.Name}}</option>
+          {{end}}
+        </select>
+      </label>
+
+      <div class="actions">
+        <button type="submit" class="btn">Guardar</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- ── Horarios ────────────────────────────────────────── -->
+  <div class="tab-panel" id="tab-days">
+    {{if .DayOverrideSuccess}}<div class="flash-ok">Override de día guardado correctamente.</div>{{end}}
+    {{if .DayOverrideError}}<div class="flash-err">{{.DayOverrideError}}</div>{{end}}
+
+    <p style="font-size:.825rem;color:#6e6e73;margin:.1rem 0 1.1rem;line-height:1.6">
+      Las horas alternan por posición:
+      <span style="background:#e8f9ee;color:#1a7f4b;padding:.15rem .55rem;border-radius:12px;font-weight:600;font-size:.78rem">entrada</span>
+      <span style="background:#f5f5f7;color:#6e6e73;padding:.15rem .55rem;border-radius:12px;font-weight:600;font-size:.78rem">salida</span>
+      <span style="background:#e8f9ee;color:#1a7f4b;padding:.15rem .55rem;border-radius:12px;font-weight:600;font-size:.78rem">entrada</span>
+      <span style="background:#f5f5f7;color:#6e6e73;padding:.15rem .55rem;border-radius:12px;font-weight:600;font-size:.78rem">salida</span>
+      — el total debe ser par.
+    </p>
+
+    {{range .DayOverrides}}
+    <div class="acc-item" id="acc-{{.Weekday}}">
+      <button class="acc-header" onclick="toggleAcc({{.Weekday}})">
+        <span>{{.Name}}</span>
+        <div class="acc-right">
+          <span class="acc-status {{if .Hours}}has-override{{end}}" id="acc-status-{{.Weekday}}">
+            {{if .Hours}}Con override{{else}}Sin override{{end}}
+          </span>
+          <span class="acc-chevron">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </span>
+        </div>
+      </button>
+      <div class="acc-body">
+        <div id="pills-{{.Weekday}}" style="display:flex;flex-wrap:wrap;align-items:center;gap:.3rem;min-height:1.8rem;margin-bottom:.65rem">
+          <span id="empty-{{.Weekday}}" style="font-size:.8rem;color:#aeaeb2">Sin override — usa el horario general</span>
+        </div>
+        <form method="POST" action="/config/day-overrides" id="form-{{.Weekday}}">
+          <input type="hidden" name="weekday" value="{{.Weekday}}">
+          <input type="hidden" name="hours" id="hours-{{.Weekday}}" value="">
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+            <button type="button" class="btn btn-sm btn-ghost" onclick="doOpenModal({{.Weekday}},'{{.Name}}')">+ Añadir hora</button>
+            <button type="button" class="btn btn-sm" id="save-{{.Weekday}}" disabled style="display:inline-flex;align-items:center;gap:.35rem" title="Guardar" onclick="doSaveDay({{.Weekday}})">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              <span class="btn-label">Guardar</span>
+            </button>
+            <button type="button" class="btn btn-sm btn-ghost" id="copy-{{.Weekday}}" style="display:none;align-items:center;gap:.35rem" title="Copiar horarios a otros días" onclick="doCopyOpen({{.Weekday}})">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span class="btn-label">Copiar</span>
+            </button>
+            <button type="button" class="btn btn-sm btn-danger" id="del-{{.Weekday}}" style="display:none;align-items:center;gap:.35rem" title="Borrar override" onclick="doDeleteOverride({{.Weekday}})">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              <span class="btn-label">Eliminar</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+    {{end}}
+
+    <!-- Modal añadir hora -->
+    <div id="do-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:18px;padding:2rem;width:min(320px,90vw);box-shadow:0 8px 40px rgba(0,0,0,.18)">
+        <h3 id="do-modal-title" style="margin:0 0 1.25rem;font-size:1.05rem;font-weight:600;letter-spacing:-.02em"></h3>
+        <label style="margin-top:0">Hora
+          <input type="text" id="do-time" maxlength="5" placeholder="09:00"
+            autocomplete="off" inputmode="numeric"
+            oninput="_doTimeMask(this)"
+            style="margin-top:.5rem;font-size:1.6rem;letter-spacing:.1em;text-align:center;padding:.65rem 1rem">
+        </label>
+        <div style="display:flex;gap:.75rem;margin-top:1.5rem">
+          <button class="btn" onclick="doConfirmHour()" style="flex:1">Confirmar</button>
+          <button class="btn btn-ghost" onclick="doCloseModal()" style="flex:1">Cancelar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal copiar a otros días -->
+    <div id="do-copy-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:18px;padding:2rem;width:min(320px,90vw);box-shadow:0 8px 40px rgba(0,0,0,.18)">
+        <h3 style="margin:0 0 .25rem;font-size:1.05rem;font-weight:600;letter-spacing:-.02em">Copiar horarios a…</h3>
+        <p id="do-copy-subtitle" style="margin:0 0 1.1rem;font-size:.8rem;color:#aeaeb2"></p>
+        <div id="do-copy-days" style="display:flex;flex-direction:column;gap:.15rem"></div>
+        <label style="display:flex;align-items:center;gap:.5rem;margin-top:.85rem;text-transform:none;letter-spacing:0;font-size:.825rem;color:#6e6e73;font-weight:400;cursor:pointer;border-top:1.5px solid #f0f0f5;padding-top:.85rem">
+          <input type="checkbox" id="do-copy-all" onchange="doCopyToggleAll(this.checked)" style="width:auto;margin:0;accent-color:#0071e3">
+          Seleccionar todos
+        </label>
+        <div style="display:flex;gap:.75rem;margin-top:1.25rem">
+          <button class="btn" id="do-copy-confirm-btn" onclick="doCopyConfirm()" style="flex:1">Copiar</button>
+          <button class="btn btn-ghost" onclick="doCopyClose()" style="flex:1">Cancelar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Contraseñas ─────────────────────────────────────── -->
+  <div class="tab-panel" id="tab-passwords">
+    <h2>Cambiar contraseña de acceso</h2>
+    {{if .AccountPwSuccess}}<div class="flash-ok">Contraseña de acceso actualizada correctamente.</div>{{end}}
+    {{if .AccountPwError}}<div class="flash-err">{{.AccountPwError}}</div>{{end}}
+
+    <form method="POST" action="/config/account-password">
+      <label>Contraseña actual</label>
+      <div class="pw-wrap">
+        <input id="cpw" type="password" name="current_password" required autocomplete="current-password">
+        <button type="button" class="pw-toggle" onclick="togglePw('cpw','cico-s','cico-h')" aria-label="Mostrar">
+          <svg id="cico-s" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          <svg id="cico-h" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+        </button>
+      </div>
+      <label>Nueva contraseña <span class="hint">(mínimo 8 caracteres)</span></label>
+      <div class="pw-wrap">
+        <input id="npw" type="password" name="new_password" required minlength="8" autocomplete="new-password">
+        <button type="button" class="pw-toggle" onclick="togglePw('npw','nico-s','nico-h')" aria-label="Mostrar">
+          <svg id="nico-s" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          <svg id="nico-h" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+        </button>
+      </div>
+      <label>Confirmar nueva contraseña</label>
+      <div class="pw-wrap">
+        <input id="rpw" type="password" name="confirm_password" required minlength="8" autocomplete="new-password">
+        <button type="button" class="pw-toggle" onclick="togglePw('rpw','rico-s','rico-h')" aria-label="Mostrar">
+          <svg id="rico-s" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          <svg id="rico-h" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+        </button>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn">Actualizar contraseña</button>
+      </div>
+    </form>
+
+    <hr class="section-divider">
+    <h2>Contraseña de Sesame Time</h2>
+    {{if .PwSuccess}}<div class="flash-ok">Contraseña actualizada.</div>{{end}}
+    {{if .PwError}}<div class="flash-err">{{.PwError}}</div>{{end}}
+
+    <form method="POST" action="/config/password">
+      <label>Modo de almacenamiento
+        <select name="pw_mode" id="pw_mode" onchange="togglePwHint()">
+          <option value="db"{{if eq .PwMode "db"}} selected{{end}}>Cifrada en base de datos</option>
+          <option value="memory"{{if eq .PwMode "memory"}} selected{{end}}>Solo en memoria (se pierde al reiniciar)</option>
+          <option value="clear">Borrar contraseña guardada</option>
+        </select>
+      </label>
+      <div id="pw_hint_memory" style="display:none;margin-top:.5rem;font-size:.825rem;color:#aeaeb2">
+        La contraseña se almacena solo en RAM. Si el servidor se reinicia, deberás introducirla de nuevo.
+      </div>
+      <label>Contraseña de Sesame</label>
+      <div class="pw-wrap">
+        <input id="spw" type="password" name="sesame_password" autocomplete="new-password">
+        <button type="button" class="pw-toggle" onclick="togglePw('spw','sico-s','sico-h')" aria-label="Mostrar">
+          <svg id="sico-s" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          <svg id="sico-h" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+        </button>
+      </div>
+      <div class="actions">
+        <button type="submit" class="btn">Guardar contraseña</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+// ── Tabs ──────────────────────────────────────────────────────
+function switchTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
+  document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('tab-' + name + '-btn').classList.add('active');
+}
+
+// ── Accordion ─────────────────────────────────────────────────
+function toggleAcc(wd) {
+  document.getElementById('acc-' + wd).classList.toggle('open');
+}
+
+// ── Day overrides ─────────────────────────────────────────────
+var _dow = {};
+var _dowHasServer = {};
+var _modalWd = null;
+var _copySourceWd = null;
+var _allDays = [{{range .DayOverrides}}{wd:{{.Weekday}},name:"{{.Name}}"},{{end}}];
+
+function _doInit(wd, hoursStr) {
+  _dow[wd] = hoursStr ? hoursStr.split(',').filter(function(s){ return s.trim() !== ''; }) : [];
+  _doRender(wd);
+}
+
+function _doRender(wd) {
+  var container = document.getElementById('pills-' + wd);
+  var emptyMsg  = document.getElementById('empty-' + wd);
+  var saveBtn   = document.getElementById('save-' + wd);
+  var delBtn    = document.getElementById('del-' + wd);
+  if (!container) return;
+  var hours = _dow[wd] || [];
+  container.innerHTML = '';
+  if (hours.length === 0) {
+    container.appendChild(emptyMsg);
+  } else {
+    hours.forEach(function(t, i) {
+      var isIn = i % 2 === 0;
+      var pill = document.createElement('span');
+      pill.style.cssText = 'display:inline-flex;align-items:center;gap:.25rem;padding:.25rem .65rem;border-radius:20px;font-size:.825rem;font-weight:600;' +
+        (isIn ? 'background:#e8f9ee;color:#1a7f4b;' : 'background:#f5f5f7;color:#6e6e73;');
+      var label = document.createElement('span');
+      label.textContent = t;
+      var btn = document.createElement('button');
+      btn.type = 'button'; btn.textContent = '×'; btn.title = 'Eliminar';
+      btn.style.cssText = 'background:none;border:none;padding:0 0 0 .1rem;cursor:pointer;color:inherit;font-size:1rem;line-height:1;opacity:.65;';
+      btn.addEventListener('click', (function(w, idx){ return function(){ _doRemove(w, idx); }; })(wd, i));
+      pill.appendChild(label); pill.appendChild(btn);
+      container.appendChild(pill);
+    });
+  }
+  var valid = hours.length >= 2 && hours.length % 2 === 0;
+  document.getElementById('hours-' + wd).value = hours.join(',');
+  if (saveBtn) saveBtn.disabled = !valid;
+  if (delBtn) delBtn.style.display = (_dowHasServer[wd] || hours.length > 0) ? 'inline-flex' : 'none';
+  var copyBtn = document.getElementById('copy-' + wd);
+  if (copyBtn) { copyBtn.style.display = hours.length > 0 ? 'inline-flex' : 'none'; copyBtn.disabled = !valid; }
+  // update accordion status
+  var statusEl = document.getElementById('acc-status-' + wd);
+  if (statusEl) {
+    if (hours.length > 0) {
+      statusEl.textContent = 'Con override';
+      statusEl.classList.add('has-override');
+    } else if (_dowHasServer[wd]) {
+      statusEl.textContent = 'Con override';
+      statusEl.classList.add('has-override');
+    } else {
+      statusEl.textContent = 'Sin override';
+      statusEl.classList.remove('has-override');
+    }
+  }
+}
+
+function _doTimeMask(inp) {
+  var raw = inp.value.replace(/\D/g, '').substring(0, 4);
+  var result = raw.length > 2 ? raw.substring(0, 2) + ':' + raw.substring(2) : raw;
+  if (inp.value !== result) {
+    inp.value = result;
+    inp.setSelectionRange(result.length, result.length);
+  }
+  // Live border feedback
+  var parts = result.split(':');
+  var valid = result.length === 5 &&
+    parseInt(parts[0], 10) <= 23 &&
+    parseInt(parts[1], 10) <= 59;
+  inp.style.borderColor = result.length === 0 ? '' : (valid ? '#1a7f4b' : '#e0e0e5');
+}
+
+function doOpenModal(wd, name) {
+  _modalWd = wd;
+  document.getElementById('do-modal-title').textContent = 'Añadir hora — ' + name;
+  var inp = document.getElementById('do-time');
+  inp.value = '';
+  inp.style.borderColor = '';
+  document.getElementById('do-modal').style.display = 'flex';
+  setTimeout(function(){ inp.focus(); }, 50);
+}
+
+function doCloseModal() {
+  document.getElementById('do-modal').style.display = 'none';
+  _modalWd = null;
+}
+
+function doConfirmHour() {
+  var val = document.getElementById('do-time').value.trim();
+  var parts = val.split(':');
+  if (val.length !== 5 || parts.length !== 2) {
+    document.getElementById('do-time').focus();
+    return;
+  }
+  var h = parseInt(parts[0], 10);
+  var m = parseInt(parts[1], 10);
+  if (isNaN(h) || h < 0 || h > 23 || isNaN(m) || m < 0 || m > 59) {
+    document.getElementById('do-time').style.borderColor = '#e3001a';
+    document.getElementById('do-time').focus();
+    return;
+  }
+  var time = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+  if (!_dow[_modalWd]) _dow[_modalWd] = [];
+  _dow[_modalWd].push(time);
+  _doRender(_modalWd);
+  doCloseModal();
+}
+
+function _doRemove(wd, idx) {
+  _dow[wd].splice(idx, 1);
+  _doRender(wd);
+}
+
+function doSaveDay(wd) {
+  var hours = _dow[wd] || [];
+  if (hours.length < 2 || hours.length % 2 !== 0) {
+    showToast('El número de horas debe ser par y al menos 2', 'error');
+    return;
+  }
+  var saveBtn = document.getElementById('save-' + wd);
+  saveBtn.disabled = true;
+  var body = new URLSearchParams();
+  body.set('weekday', wd);
+  body.set('hours', hours.join(','));
+  fetch('/config/day-overrides', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body.toString()
+  }).then(function(r) {
+    var params = new URL(r.url).searchParams;
+    var err = params.get('day_override_error');
+    if (err) {
+      showToast(err.replace(/\+/g, ' '), 'error');
+      saveBtn.disabled = false;
+    } else {
+      showToast('Horario guardado', 'success');
+      _dowHasServer[wd] = true;
+      _doRender(wd);
+    }
+  }).catch(function() {
+    showToast('Error de red al guardar', 'error');
+    saveBtn.disabled = false;
+  });
+}
+
+function doDeleteOverride(wd) {
+  if (!confirm('¿Eliminar el override de este día y volver al horario general?')) return;
+  _dow[wd] = [];
+  _dowHasServer[wd] = false;
+  document.getElementById('hours-' + wd).value = '';
+  document.getElementById('form-' + wd).submit();
+}
+
+document.getElementById('do-modal').addEventListener('click', function(e) {
+  if (e.target === this) doCloseModal();
+});
+document.getElementById('do-copy-modal').addEventListener('click', function(e) {
+  if (e.target === this) doCopyClose();
+});
+document.addEventListener('keydown', function(e) {
+  if (_modalWd !== null) {
+    if (e.key === 'Enter') { e.preventDefault(); doConfirmHour(); }
+    if (e.key === 'Escape') doCloseModal();
+  }
+  if (_copySourceWd !== null && e.key === 'Escape') doCopyClose();
+});
+
+function doCopyOpen(wd) {
+  if (!(_dow[wd] && _dow[wd].length >= 2 && _dow[wd].length % 2 === 0)) return;
+  _copySourceWd = wd;
+  var sourceName = '';
+  var container = document.getElementById('do-copy-days');
+  container.innerHTML = '';
+  _allDays.forEach(function(d) {
+    if (d.wd === wd) { sourceName = d.name; return; }
+    var label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:.5rem;cursor:pointer;text-transform:none;letter-spacing:0;font-size:.9rem;color:#1d1d1f;font-weight:400;margin:0;padding:.3rem .1rem';
+    var cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.value = d.wd;
+    cb.style.cssText = 'width:auto;margin:0;accent-color:#0071e3;flex-shrink:0';
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(d.name));
+    container.appendChild(label);
+  });
+  document.getElementById('do-copy-subtitle').textContent = 'Desde: ' + sourceName;
+  document.getElementById('do-copy-all').checked = false;
+  document.getElementById('do-copy-modal').style.display = 'flex';
+}
+
+function doCopyClose() {
+  document.getElementById('do-copy-modal').style.display = 'none';
+  _copySourceWd = null;
+}
+
+function doCopyToggleAll(checked) {
+  document.querySelectorAll('#do-copy-days input[type=checkbox]').forEach(function(cb) {
+    cb.checked = checked;
+  });
+}
+
+function doCopyConfirm() {
+  if (_copySourceWd === null) return;
+  var sourceHours = (_dow[_copySourceWd] || []).slice();
+
+  var targets = [];
+  document.querySelectorAll('#do-copy-days input[type=checkbox]:checked').forEach(function(cb) {
+    targets.push(parseInt(cb.value, 10));
+  });
+  if (targets.length === 0) { doCopyClose(); return; }
+
+  // Update UI immediately
+  targets.forEach(function(wd) {
+    _dow[wd] = sourceHours.slice();
+    _doRender(wd);
+  });
+
+  // Persist all days in parallel
+  var confirmBtn = document.getElementById('do-copy-confirm-btn');
+  confirmBtn.disabled = true;
+  confirmBtn.textContent = 'Guardando…';
+
+  Promise.all(targets.map(function(wd) {
+    var body = new URLSearchParams();
+    body.set('weekday', wd);
+    body.set('hours', sourceHours.join(','));
+    return fetch('/config/day-overrides', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: body.toString()
+    });
+  })).then(function(responses) {
+    var failed = responses.filter(function(r) { return !r.ok && !r.redirected; });
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = 'Copiar';
+    if (failed.length > 0) {
+      alert('Error al guardar ' + failed.length + ' día(s). Comprueba la conexión e inténtalo de nuevo.');
+      return;
+    }
+    targets.forEach(function(wd) { _dowHasServer[wd] = true; _doRender(wd); });
+    doCopyClose();
+  }).catch(function() {
+    confirmBtn.disabled = false;
+    confirmBtn.textContent = 'Copiar';
+    alert('Error de red. Inténtalo de nuevo.');
+  });
+}
+
+// Init server data
+{{range .DayOverrides}}
+_dowHasServer[{{.Weekday}}] = {{if .Hours}}true{{else}}false{{end}};
+_doInit({{.Weekday}}, "{{.Hours}}");
+{{end}}
+
+// Auto-open accordion for days with overrides
+{{range .DayOverrides}}{{if .Hours}}
+document.getElementById('acc-{{.Weekday}}').classList.add('open');
+{{end}}{{end}}
+
+// ── Password toggle ───────────────────────────────────────────
+function togglePw(id, showId, hideId) {
+  var inp = document.getElementById(id);
+  var show = document.getElementById(showId);
+  var hide = document.getElementById(hideId);
+  if (inp.type === 'password') { inp.type = 'text'; show.style.display='none'; hide.style.display=''; }
+  else { inp.type = 'password'; show.style.display=''; hide.style.display='none'; }
+}
+function togglePwHint() {
+  var mode = document.getElementById('pw_mode').value;
+  document.getElementById('pw_hint_memory').style.display = mode === 'memory' ? 'block' : 'none';
+}
+togglePwHint();
+
+// ── Auto-switch tab based on flash ────────────────────────────
+{{if or .DayOverrideSuccess .DayOverrideError}}switchTab('days');{{end}}
+{{if or .PwSuccess .PwError .AccountPwSuccess .AccountPwError}}switchTab('passwords');{{end}}
+</script>
+{{end}}

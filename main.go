@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -12,6 +15,11 @@ import (
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/joho/godotenv"
+
+	"sesame-bot/internal/crypto"
+	appdb "sesame-bot/internal/db"
+	"sesame-bot/internal/scheduler"
+	"sesame-bot/internal/ws"
 )
 
 const (
@@ -28,26 +36,11 @@ const (
 	actionOut actionType = "OUT"
 )
 
-// scheduledTime guarda una hora HH:MM y el tipo de acción asociada
-type scheduledTime struct {
-	hour   int
-	minute int
-	action actionType
-}
-
-// daySchedule contiene los horarios de entrada y salida para un día concreto
-type daySchedule struct {
-	in  []string
-	out []string
-}
-
-// location contiene coordenadas de geolocalización
 type location struct {
 	lat float64
 	lon float64
 }
 
-// dayNames mapea cada día de la semana al prefijo usado en las variables de entorno
 var dayNames = map[time.Weekday]string{
 	time.Sunday:    "SUNDAY",
 	time.Monday:    "MONDAY",
@@ -58,130 +51,104 @@ var dayNames = map[time.Weekday]string{
 	time.Saturday:  "SATURDAY",
 }
 
-// ─── Config ──────────────────────────────────────────────────────────────────
-
 type config struct {
+	userID         string
 	email          string
 	password       string
 	headless       bool
-	weekend        bool                         // si es false, omitir ejecución en sábado y domingo
-	hoursIn        []string                     // horario genérico de entrada
-	hoursOut       []string                     // horario genérico de salida
-	overrides      map[time.Weekday]daySchedule // horarios específicos por día
-	locationOffice location                     // coordenadas de la oficina
-	locationHome   location                     // coordenadas de casa
-	officeDays     map[time.Weekday]bool        // días que se va a la oficina
+	dryRun         bool
+	locationOffice location
+	locationHome   location
+	officeDays     map[time.Weekday]bool
 }
 
-func buildConfig() (config, error) {
-	email := os.Getenv("SESAME_EMAIL")
-	password := os.Getenv("SESAME_PASSWORD")
-	if email == "" || password == "" {
-		return config{}, fmt.Errorf("SESAME_EMAIL y SESAME_PASSWORD son requeridos")
+type holidayEntry struct {
+	Date string `json:"date"` // "YYYY-MM-DD"
+	Name string `json:"name"`
+}
+
+type holidaysPage struct {
+	Data []holidayEntry `json:"data"`
+	Meta struct {
+		CurrentPage int `json:"currentPage"`
+		LastPage    int `json:"lastPage"`
+	} `json:"meta"`
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+func main() {
+	// Load .env if present (local dev); in Docker vars come via --env-file
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		log.Printf("Aviso cargando .env: %v", err)
 	}
 
-	headless := os.Getenv("HEADLESS") != "false"
-	weekend := os.Getenv("WEEKEND") != "false"
+	ctx := context.Background()
 
-	hoursIn := splitTimes(os.Getenv("HOURS_IN"))
-	hoursOut := splitTimes(os.Getenv("HOURS_OUT"))
-	if len(hoursIn) == 0 || len(hoursOut) == 0 {
-		return config{}, fmt.Errorf("HOURS_IN y HOURS_OUT son requeridos")
-	}
-
-	overrides := make(map[time.Weekday]daySchedule)
-	for weekday, prefix := range dayNames {
-		in := splitTimes(os.Getenv(prefix + "_IN"))
-		out := splitTimes(os.Getenv(prefix + "_OUT"))
-		if len(in) > 0 || len(out) > 0 {
-			overrides[weekday] = daySchedule{in: in, out: out}
-		}
-	}
-
-	locationOffice, err := parseLocation(os.Getenv("LOCATION_OFFICE"))
+	pool, err := appdb.Connect(ctx)
 	if err != nil {
-		return config{}, fmt.Errorf("LOCATION_OFFICE inválido: %v", err)
+		log.Fatalf("Error conectando a la base de datos: %v", err)
 	}
-	locationHome, err := parseLocation(os.Getenv("LOCATION_HOME"))
+	defer pool.Close()
+	log.Println("Conectado a PostgreSQL")
+
+	if err := appdb.RunMigrations(ctx, pool, "migrations"); err != nil {
+		log.Fatalf("Error en migraciones: %v", err)
+	}
+
+	encKey, err := crypto.LoadKey()
 	if err != nil {
-		return config{}, fmt.Errorf("LOCATION_HOME inválido: %v", err)
+		log.Fatalf("Error cargando ENCRYPTION_KEY: %v", err)
 	}
 
-	officeDays := parseOfficeDays(os.Getenv("OFFICE_DAYS"))
+	wsClient := &ws.Whatsapp{
+		Token:      os.Getenv("EVOLUTION_TOKEN"),
+		Instance:   os.Getenv("EVOLUTION_INSTANCE"),
+		Name:       os.Getenv("EVOLUTION_NAME"),
+		RetryDelay: 5,
+		MaxRetries: 3,
+	}
 
-	return config{
+	sched := scheduler.New(pool, encKey, runActionBridge, wsClient)
+
+	go startWebServer(pool, sched, wsClient)
+
+	sched.Run(ctx)
+}
+
+// runActionBridge adapts the scheduler's call to the concrete runAction function.
+// headless mode is controlled by the HEADLESS env var (default: true).
+func runActionBridge(
+	userID, email, password string,
+	officeDays string,
+	offLat, offLon, homeLat, homeLon float64,
+	action string,
+	_ time.Time,
+) (string, error) {
+	cfg := config{
+		userID:         userID,
 		email:          email,
 		password:       password,
-		headless:       headless,
-		weekend:        weekend,
-		hoursIn:        hoursIn,
-		hoursOut:       hoursOut,
-		overrides:      overrides,
-		locationOffice: locationOffice,
-		locationHome:   locationHome,
-		officeDays:     officeDays,
-	}, nil
+		headless:       os.Getenv("HEADLESS") != "false",
+		dryRun:         os.Getenv("DRY_RUN") == "true",
+		locationOffice: location{lat: offLat, lon: offLon},
+		locationHome:   location{lat: homeLat, lon: homeLon},
+		officeDays:     parseOfficeDays(officeDays),
+	}
+	return runAction(cfg, actionType(action))
 }
 
-func loadConfig() config {
-	// Cargar .env si existe (desarrollo local).
-	// En Docker las variables llegan por --env-file, así que no es obligatorio.
-	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
-		log.Fatal("Error cargando archivo .env: ", err)
+// ─── Location helper ──────────────────────────────────────────────────────────
+
+func getLocationForDay(cfg config, day time.Weekday) location {
+	if cfg.officeDays[day] {
+		return cfg.locationOffice
 	}
-	cfg, err := buildConfig()
-	if err != nil {
-		log.Fatal("Error en configuración: ", err)
-	}
-	return cfg
+	return cfg.locationHome
 }
 
-// getScheduleForDay devuelve los scheduledTime para el día indicado.
-// Aplica el override del día si existe; si no, usa el horario genérico.
-// Devuelve nil si es fin de semana y weekend=false.
-func getScheduleForDay(cfg config, day time.Weekday) []scheduledTime {
-	isWeekend := day == time.Saturday || day == time.Sunday
-	if isWeekend && !cfg.weekend {
-		return nil
-	}
+// ─── Parsers ──────────────────────────────────────────────────────────────────
 
-	// Determinar las horas de entrada y salida para este día
-	inTimes := cfg.hoursIn
-	outTimes := cfg.hoursOut
-
-	if override, ok := cfg.overrides[day]; ok {
-		if len(override.in) > 0 {
-			inTimes = override.in
-		}
-		if len(override.out) > 0 {
-			outTimes = override.out
-		}
-	}
-
-	var schedule []scheduledTime
-
-	for _, raw := range inTimes {
-		st, err := parseTime(raw, actionIn)
-		if err != nil {
-			log.Printf("⚠️  Hora IN inválida '%s': %v", raw, err)
-			continue
-		}
-		schedule = append(schedule, st)
-	}
-
-	for _, raw := range outTimes {
-		st, err := parseTime(raw, actionOut)
-		if err != nil {
-			log.Printf("⚠️  Hora OUT inválida '%s': %v", raw, err)
-			continue
-		}
-		schedule = append(schedule, st)
-	}
-
-	return schedule
-}
-
-// parseLocation parsea "latitud,longitud" desde una variable de entorno
 func parseLocation(raw string) (location, error) {
 	if raw == "" {
 		return location{}, nil
@@ -201,14 +168,11 @@ func parseLocation(raw string) (location, error) {
 	return location{lat: lat, lon: lon}, nil
 }
 
-// parseOfficeDays parsea "Tuesday,Thursday" y devuelve un mapa de weekdays
-// Acepta coma o = como separador para mayor flexibilidad
 func parseOfficeDays(raw string) map[time.Weekday]bool {
 	result := make(map[time.Weekday]bool)
 	if raw == "" {
 		return result
 	}
-	// Normalizar separadores: reemplazar = por ,
 	raw = strings.ReplaceAll(raw, "=", ",")
 	nameToWeekday := map[string]time.Weekday{
 		"sunday": time.Sunday, "monday": time.Monday, "tuesday": time.Tuesday,
@@ -219,19 +183,9 @@ func parseOfficeDays(raw string) map[time.Weekday]bool {
 		part = strings.TrimSpace(strings.ToLower(part))
 		if wd, ok := nameToWeekday[part]; ok {
 			result[wd] = true
-		} else if part != "" {
-			log.Printf("⚠️  Día desconocido en OFFICE_DAYS: '%s'", part)
 		}
 	}
 	return result
-}
-
-// getLocationForDay devuelve las coordenadas según si el día es de oficina o de casa
-func getLocationForDay(cfg config, day time.Weekday) location {
-	if cfg.officeDays[day] {
-		return cfg.locationOffice
-	}
-	return cfg.locationHome
 }
 
 func splitTimes(raw string) []string {
@@ -248,84 +202,103 @@ func splitTimes(raw string) []string {
 	return result
 }
 
-func parseTime(raw string, action actionType) (scheduledTime, error) {
+func parseTime(raw string) error {
 	var h, m int
 	if _, err := fmt.Sscanf(raw, "%d:%d", &h, &m); err != nil {
-		return scheduledTime{}, fmt.Errorf("formato esperado HH:MM")
+		return fmt.Errorf("formato esperado HH:MM")
 	}
 	if h < 0 || h > 23 || m < 0 || m > 59 {
-		return scheduledTime{}, fmt.Errorf("hora fuera de rango")
+		return fmt.Errorf("hora fuera de rango")
 	}
-	return scheduledTime{hour: h, minute: m, action: action}, nil
+	return nil
 }
 
-// ─── Main / Scheduler ─────────────────────────────────────────────────────────
+// ─── Holiday helpers ──────────────────────────────────────────────────────────
 
-func main() {
-	cfg := loadConfig()
-	holder := &configHolder{cfg: cfg}
+// startHolidayCapture enables CDP network tracking on the page BEFORE any navigation
+// and listens for the holidays API response that the SPA makes with its own auth session.
+// It returns a wait function that must be called after login to collect the results.
+func startHolidayCapture(page *rod.Page, logger *log.Logger) func() []holidayEntry {
+	type pageResult struct {
+		entries  []holidayEntry
+		lastPage int
+	}
+	ch := make(chan pageResult, 10)
+	year := strconv.Itoa(time.Now().Year())
 
-	log.Println("Bot de Sesame Time iniciado")
-	log.Printf("Modo headless : %v", cfg.headless)
-	log.Printf("Ejecutar fines de semana: %v", cfg.weekend)
-	log.Printf("Horario genérico IN : %v", cfg.hoursIn)
-	log.Printf("Horario genérico OUT: %v", cfg.hoursOut)
-	for day, ov := range cfg.overrides {
-		log.Printf("Override %s → IN:%v OUT:%v", dayNames[day], ov.in, ov.out)
+	if err := (proto.NetworkEnable{}).Call(page); err != nil {
+		logger.Printf("holidays: error habilitando network tracking: %v", err)
+		return func() []holidayEntry { return nil }
 	}
 
-	go startWebServer(holder)
+	wait := page.EachEvent(func(e *proto.NetworkResponseReceived) {
+		if !strings.Contains(e.Response.URL, "holidays") || !strings.Contains(e.Response.URL, year) {
+			return
+		}
+		logger.Printf("holidays: respuesta detectada: %s (status %d)", e.Response.URL, e.Response.Status)
 
-	executed := map[string]bool{}
-	lastDate := ""
-
-	log.Println("Scheduler corriendo. Esperando hora programada...")
-
-	for {
-		now := time.Now()
-		today := now.Format("2006-01-02")
-		cfg := holder.get()
-
-		// Resetear el registro de ejecuciones al comenzar un nuevo día
-		if today != lastDate {
-			executed = map[string]bool{}
-			lastDate = today
-			schedule := getScheduleForDay(cfg, now.Weekday())
-			if schedule == nil {
-				log.Printf("📅 %s es fin de semana — no se ejecutarán acciones", dayNames[now.Weekday()])
-			} else {
-				log.Printf("📅 Horario de hoy (%s):", dayNames[now.Weekday()])
-				for _, st := range schedule {
-					log.Printf("   %02d:%02d → %s", st.hour, st.minute, st.action)
-				}
-			}
+		result, err := proto.NetworkGetResponseBody{RequestID: e.RequestID}.Call(page)
+		if err != nil {
+			return // body not yet buffered by Chrome, will be captured on the next event
 		}
 
-		schedule := getScheduleForDay(cfg, now.Weekday())
-		for _, st := range schedule {
-			key := fmt.Sprintf("%s-%02d:%02d-%s", today, st.hour, st.minute, st.action)
-			if executed[key] {
-				continue
+		bodyStr := result.Body
+		if result.Base64Encoded {
+			decoded, decErr := base64.StdEncoding.DecodeString(result.Body)
+			if decErr != nil {
+				logger.Printf("holidays: error decodificando base64: %v", decErr)
+				return
 			}
-			if now.Hour() == st.hour && now.Minute() == st.minute {
-				log.Printf("⏰ Ejecutando acción %s a las %02d:%02d", st.action, st.hour, st.minute)
-				if err := runAction(cfg, st.action); err != nil {
-					log.Printf("❌ Error en acción %s: %v", st.action, err)
-				} else {
-					log.Printf("✅ Acción %s completada", st.action)
-				}
-				executed[key] = true
-			}
+			bodyStr = string(decoded)
 		}
 
-		// Revisar cada 30 segundos para no perder el minuto exacto
-		time.Sleep(30 * time.Second)
+		var p holidaysPage
+		if err := json.Unmarshal([]byte(bodyStr), &p); err != nil {
+			logger.Printf("holidays: error parseando JSON: %v — body: %.200s", err, bodyStr)
+			return
+		}
+		logger.Printf("holidays: página %d/%d, %d entradas", p.Meta.CurrentPage, p.Meta.LastPage, len(p.Data))
+		select {
+		case ch <- pageResult{p.Data, p.Meta.LastPage}:
+		default:
+			logger.Printf("holidays: canal lleno, descartando página %d", p.Meta.CurrentPage)
+		}
+	})
+	go wait()
+
+	return func() []holidayEntry {
+		select {
+		case first := <-ch:
+			all := first.entries
+			for p := 2; p <= first.lastPage; p++ {
+				select {
+				case next := <-ch:
+					all = append(all, next.entries...)
+				case <-time.After(5 * time.Second):
+					logger.Printf("holidays: timeout esperando página %d/%d", p, first.lastPage)
+				}
+			}
+			logger.Printf("holidays: total %d días libres cargados", len(all))
+			return all
+		case <-time.After(8 * time.Second):
+			logger.Println("holidays: timeout — no se recibió respuesta del endpoint holidays")
+			return nil
+		}
 	}
 }
 
-// ─── Acción completa: login → click → esperar → logout ───────────────────────
+// ─── Browser automation ───────────────────────────────────────────────────────
 
-func runAction(cfg config, action actionType) error {
+func runAction(cfg config, action actionType) (string, error) {
+	logger := log.New(log.Writer(), fmt.Sprintf("[%s] ", cfg.userID), log.LstdFlags)
+
+	// Determine location label for the log detail field.
+	day := time.Now().Weekday()
+	locLabel := "Casa"
+	if cfg.officeDays[day] {
+		locLabel = "Oficina"
+	}
+
 	u := launcher.New().
 		Headless(cfg.headless).
 		Set("disable-blink-features", "AutomationControlled").
@@ -337,8 +310,10 @@ func runAction(cfg config, action actionType) error {
 
 	page := browser.MustPage("").Timeout(pageTimeout)
 
-	// Aplicar geolocalización según el día (oficina o casa)
-	loc := getLocationForDay(cfg, time.Now().Weekday())
+	// Register CDP network listener before any navigation so the SPA request is captured.
+	waitHolidays := startHolidayCapture(page, logger)
+
+	loc := getLocationForDay(cfg, day)
 	if loc.lat != 0 || loc.lon != 0 {
 		accuracy := 10.0
 		geoCmd := proto.EmulationSetGeolocationOverride{
@@ -347,9 +322,8 @@ func runAction(cfg config, action actionType) error {
 			Accuracy:  &accuracy,
 		}
 		if err := geoCmd.Call(page); err != nil {
-			return fmt.Errorf("establecer geolocalización: %w", err)
+			return "", fmt.Errorf("establecer geolocalización: %w", err)
 		}
-		// Conceder permiso de geolocalización automáticamente
 		permCmd := proto.BrowserGrantPermissions{
 			Permissions: []proto.BrowserPermissionType{
 				proto.BrowserPermissionTypeGeolocation,
@@ -357,25 +331,47 @@ func runAction(cfg config, action actionType) error {
 			Origin: loginURL,
 		}
 		if err := permCmd.Call(browser); err != nil {
-			return fmt.Errorf("conceder permiso de geolocalización: %w", err)
+			return "", fmt.Errorf("conceder permiso de geolocalización: %w", err)
 		}
-		log.Printf("📍 Geolocalización aplicada: %.6f, %.6f", loc.lat, loc.lon)
+		logger.Printf("Geolocalización aplicada: %.6f, %.6f", loc.lat, loc.lon)
 	}
 
-	// 1. Login
-	log.Println("Navegando al login...")
+	logger.Println("Navegando al login...")
 	if err := page.Navigate(loginURL); err != nil {
-		return fmt.Errorf("navegar a login: %w", err)
+		return "", fmt.Errorf("navegar a login: %w", err)
 	}
 	if err := page.WaitLoad(); err != nil {
-		return fmt.Errorf("esperar carga login: %w", err)
+		return "", fmt.Errorf("esperar carga login: %w", err)
 	}
-	if err := doLogin(page, cfg.email, cfg.password); err != nil {
-		return fmt.Errorf("login: %w", err)
+	if err := doLogin(page, cfg.email, cfg.password, logger); err != nil {
+		return "", fmt.Errorf("login: %w", err)
 	}
-	log.Println("Login exitoso")
+	logger.Println("Login exitoso")
 
-	// 2. Click según acción
+	holidays := waitHolidays()
+	today := time.Now().Format("2006-01-02")
+	if len(holidays) == 0 {
+		logger.Println("holidays: sin datos de días libres — se procede con el fichaje")
+	}
+	for _, h := range holidays {
+		if h.Date == today {
+			logger.Printf("Día festivo detectado: %s (%s) — omitiendo fichaje", today, h.Name)
+			return "", fmt.Errorf("%s: %w", h.Name, scheduler.ErrSkipped)
+		}
+	}
+
+	var next *holidayEntry
+	for i := range holidays {
+		if holidays[i].Date > today {
+			if next == nil || holidays[i].Date < next.Date {
+				next = &holidays[i]
+			}
+		}
+	}
+	if next != nil {
+		logger.Printf("Próximo día libre: %s (%s)", next.Date, next.Name)
+	}
+
 	var buttonText string
 	if action == actionIn {
 		buttonText = "Entrar"
@@ -383,34 +379,36 @@ func runAction(cfg config, action actionType) error {
 		buttonText = "Salir"
 	}
 
-	log.Printf("Buscando botón %q...", buttonText)
+	logger.Printf("Buscando botón %q...", buttonText)
 	btn, err := waitForElementByText(page, "span", buttonText)
 	if err != nil {
-		return fmt.Errorf("buscar botón %q: %w", buttonText, err)
+		return "", fmt.Errorf("buscar botón %q: %w", buttonText, err)
 	}
 	if err := btn.WaitVisible(); err != nil {
-		return fmt.Errorf("esperar visibilidad de botón: %w", err)
+		return "", fmt.Errorf("esperar visibilidad de botón: %w", err)
 	}
-	if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("click en botón %q: %w", buttonText, err)
-	}
-	log.Printf("Click en %q realizado. Esperando 5 segundos...", buttonText)
 
-	// 3. Esperar 5 segundos
+	if cfg.dryRun {
+		logger.Printf("[SIMULACRO] Botón %q localizado — click omitido (DRY_RUN=true)", buttonText)
+		return locLabel, nil
+	}
+
+	if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return "", fmt.Errorf("click en botón %q: %w", buttonText, err)
+	}
+	logger.Printf("Click en %q realizado. Esperando 5 segundos...", buttonText)
+
 	time.Sleep(5 * time.Second)
 
-	// 4. Cerrar sesión
-	log.Println("Cerrando sesión...")
-	if err := doLogout(page); err != nil {
-		return fmt.Errorf("logout: %w", err)
+	logger.Println("Cerrando sesión...")
+	if err := doLogout(page, logger); err != nil {
+		return "", fmt.Errorf("logout: %w", err)
 	}
 
-	return nil
+	return locLabel, nil
 }
 
-// ─── Login ────────────────────────────────────────────────────────────────────
-
-func doLogin(page *rod.Page, email, password string) error {
+func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 	emailSelectors := []string{
 		`input[type="email"]`,
 		`input[name="email"]`,
@@ -424,7 +422,6 @@ func doLogin(page *rod.Page, email, password string) error {
 		`input[id*="password"]`,
 	}
 
-	// Campo email
 	emailInput, err := findFirst(page, emailSelectors)
 	if err != nil {
 		return fmt.Errorf("campo email no encontrado: %w", err)
@@ -433,8 +430,7 @@ func doLogin(page *rod.Page, email, password string) error {
 		return fmt.Errorf("escribir email: %w", err)
 	}
 
-	// Botón siguiente (paso 1: email)
-	log.Println("Click en #btn-next-login...")
+	logger.Println("Click en #btn-next-login...")
 	nextBtn, err := page.Timeout(actionTimeout).Element("#btn-next-login")
 	if err != nil {
 		return fmt.Errorf("botón #btn-next-login no encontrado: %w", err)
@@ -443,7 +439,6 @@ func doLogin(page *rod.Page, email, password string) error {
 		return fmt.Errorf("click #btn-next-login: %w", err)
 	}
 
-	// Campo contraseña
 	passwordInput, err := findFirst(page, passwordSelectors)
 	if err != nil {
 		return fmt.Errorf("campo password no encontrado: %w", err)
@@ -452,8 +447,7 @@ func doLogin(page *rod.Page, email, password string) error {
 		return fmt.Errorf("escribir password: %w", err)
 	}
 
-	// Botón login (paso 2: password)
-	log.Println("Click en #btn-login-login...")
+	logger.Println("Click en #btn-login-login...")
 	loginBtn, err := page.Timeout(actionTimeout).Element("#btn-login-login")
 	if err != nil {
 		return fmt.Errorf("botón #btn-login-login no encontrado: %w", err)
@@ -462,8 +456,7 @@ func doLogin(page *rod.Page, email, password string) error {
 		return fmt.Errorf("click #btn-login-login: %w", err)
 	}
 
-	// Esperar redirección
-	log.Println("Esperando redirección post-login...")
+	logger.Println("Esperando redirección post-login...")
 	deadline := time.Now().Add(pageTimeout)
 	for time.Now().Before(deadline) {
 		info, err := page.Info()
@@ -475,12 +468,18 @@ func doLogin(page *rod.Page, email, password string) error {
 	return fmt.Errorf("timeout esperando redirección post-login")
 }
 
-// ─── Logout ───────────────────────────────────────────────────────────────────
-
-func doLogout(page *rod.Page) error {
+func doLogout(page *rod.Page, logger *log.Logger) error {
 	profileBtn, err := page.Timeout(actionTimeout).Element(".headerProfileName")
 	if err != nil {
-		return fmt.Errorf("botón .headerProfileName no encontrado: %w", err)
+		logoutButton, err := page.Timeout(actionTimeout).Element("#click-admin-header-logout")
+		if err != nil {
+			return fmt.Errorf("botón .headerProfileName no encontrado: %w", err)
+		} else {
+			if err := logoutButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
+				return fmt.Errorf("click en #click-admin-header-logout: %w", err)
+			}
+			return nil
+		}
 	}
 	if err := profileBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return fmt.Errorf("click en .headerProfileName: %w", err)
@@ -494,13 +493,10 @@ func doLogout(page *rod.Page) error {
 		return fmt.Errorf("click en #click-admin-header-logout: %w", err)
 	}
 
-	log.Println("Sesión cerrada")
+	logger.Println("Sesión cerrada")
 	return nil
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-// findFirst prueba una lista de selectores CSS y devuelve el primero que encuentre
 func findFirst(page *rod.Page, selectors []string) (*rod.Element, error) {
 	for _, sel := range selectors {
 		el, err := page.Timeout(actionTimeout).Element(sel)
@@ -511,8 +507,6 @@ func findFirst(page *rod.Page, selectors []string) (*rod.Element, error) {
 	return nil, fmt.Errorf("ningún selector encontró un elemento")
 }
 
-// waitForElementByText espera un elemento por tag y texto visible (regex).
-// Útil cuando el test-id o id del elemento puede cambiar entre deploys.
 func waitForElementByText(page *rod.Page, tag, text string) (*rod.Element, error) {
 	deadline := time.Now().Add(pageTimeout)
 	for time.Now().Before(deadline) {

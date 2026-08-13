@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sesame
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: sesame_bot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sesame -d sesame_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - sesame-net
+
+  sesame-bot:
+    image: rubn1987/sesame-bot:saas
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    networks:
+      - sesame-net
+
+volumes:
+  postgres_data:
+
+networks:
+  sesame-net:

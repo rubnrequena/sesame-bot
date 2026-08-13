@@ -1,0 +1,54 @@
+{{template "base.html" .}}
+{{define "title"}}Sesame Bot — Dashboard{{end}}
+{{define "content"}}
+<div class="card">
+  <h1>Dashboard</h1>
+
+  {{if not .User.IsApproved}}
+  <div class="flash-err">Tu cuenta está pendiente de aprobación por un administrador. Podrás guardar tu configuración una vez que sea aprobada.</div>
+  {{end}}
+
+  {{if .Config.SesameEmail}}
+  <div class="stats-grid">
+    <div class="stat-box">
+      <div class="stat-label">Cuenta Sesame</div>
+      <div class="stat-value">{{.Config.SesameEmail}}</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-label">Contraseña</div>
+      <div class="stat-value">
+        {{if .HasPassword}}<span class="badge badge-ok">Configurada</span>{{else}}<span class="badge badge-err">No configurada</span>{{end}}
+        {{if .PasswordInMemory}}<span class="badge badge-skip" style="margin-left:.35rem">Solo en memoria</span>{{end}}
+      </div>
+    </div>
+  </div>
+  {{else}}
+  <div class="flash-err">Configura tu cuenta de Sesame para activar el fichaje automático. <a href="/config">Ir a configuración</a></div>
+  {{end}}
+
+  <hr class="section-divider">
+  <h2>Últimos fichajes</h2>
+  {{if .Logs}}
+  <table>
+    <thead><tr><th>Fecha</th><th>Acción</th><th>Estado</th><th>Detalle</th></tr></thead>
+    <tbody>
+    {{range .Logs}}
+    <tr>
+      <td>{{.ExecutedAt.Format "02/01 15:04"}}</td>
+      <td><strong>{{.Action}}</strong></td>
+      <td>
+        {{if eq .Status "ok"}}<span class="badge badge-ok">OK</span>
+        {{else if eq .Status "error"}}<span class="badge badge-err">Error</span>
+        {{else}}<span class="badge badge-skip">Omitido</span>{{end}}
+      </td>
+      <td style="color:#6e6e73;font-size:.825rem">{{.Message}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  <div style="margin-top:.75rem;font-size:.875rem"><a href="/logs" style="color:#0071e3">Ver historial completo</a></div>
+  {{else}}
+  <p style="color:#aeaeb2;font-size:.875rem">Sin fichajes registrados aún.</p>
+  {{end}}
+</div>
+{{end}}
