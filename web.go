@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
@@ -21,6 +22,7 @@ import (
 	appcrypto "sesame-bot/internal/crypto"
 	"sesame-bot/internal/models"
 	"sesame-bot/internal/scheduler"
+	"sesame-bot/internal/ws"
 )
 
 //go:embed templates
@@ -681,37 +683,15 @@ func handleLogs(pool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── Admin ────────────────────────────────────────────────────────────────────
 
-func handleAdmin(pool *pgxpool.Pool) http.HandlerFunc {
-	type data struct {
-		User       *models.User
-		Users      []models.User
-		RecentLogs []models.CheckinLog
-		Success    string
-	}
-	tmpl := parseTemplates("admin.html")
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		user := currentUser(r)
-		users, _ := appdb.ListUsers(r.Context(), pool)
-		recentLogs, _ := appdb.GetAllUsersRecentLogs(r.Context(), pool, 20)
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.Execute(w, data{
-			User:       user,
-			Users:      users,
-			RecentLogs: recentLogs,
-		}); err != nil {
-			log.Printf("admin render: %v", err)
-		}
-	}
+// adminUserRow combines a User with their WhatsApp number for admin table rows.
+type adminUserRow struct {
+	models.User
+	WhatsappNumber string
 }
 
-func handleAdminToggleUser(pool *pgxpool.Pool) http.HandlerFunc {
-	type rowData struct {
-		models.User
-	}
-	rowTmpl := template.Must(template.New("row").Parse(`
-<tr id="user-{{.ID}}">
+// adminUserRowTmpl is the shared HTMX partial template for a single admin user row.
+// Used by toggle and approve handlers so both include the WhatsApp button.
+var adminUserRowTmpl = template.Must(template.New("adminRow").Parse(`<tr id="user-{{.ID}}">
   <td>{{.Email}}</td>
   <td>{{if .IsAdmin}}<span class="badge badge-ok">Admin</span>{{else}}Usuario{{end}}</td>
   <td>
@@ -745,11 +725,61 @@ func handleAdminToggleUser(pool *pgxpool.Pool) http.HandlerFunc {
       Reset pwd
     </button>
     <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
+    {{if .WhatsappNumber -}}
+    <button
+      style="margin-left:.35rem;background:none;border:none;cursor:pointer;padding:.2rem .3rem;border-radius:6px;color:#25d366;line-height:1;display:inline-flex;align-items:center;vertical-align:middle"
+      title="Enviar WhatsApp"
+      data-uid="{{.ID}}" data-email="{{.Email}}"
+      onclick="wsOpenModal(this)">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>
+    </button>
+    {{- else -}}
+    <button
+      style="margin-left:.35rem;background:none;border:none;padding:.2rem .3rem;border-radius:6px;color:#d1d1d6;line-height:1;display:inline-flex;align-items:center;vertical-align:middle;cursor:not-allowed"
+      title="Sin número de WhatsApp configurado" disabled>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>
+    </button>
+    {{- end}}
   </td>
 </tr>`))
 
+func handleAdmin(pool *pgxpool.Pool) http.HandlerFunc {
+	type data struct {
+		User       *models.User
+		Users      []adminUserRow
+		RecentLogs []models.CheckinLog
+		Success    string
+	}
+	tmpl := parseTemplates("admin.html")
+
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Extract user ID from path: /admin/users/{id}/toggle
+		user := currentUser(r)
+		users, _ := appdb.ListUsers(r.Context(), pool)
+		recentLogs, _ := appdb.GetAllUsersRecentLogs(r.Context(), pool, 20)
+
+		// Enrich each user with their WhatsApp number.
+		rows := make([]adminUserRow, len(users))
+		for i, u := range users {
+			wn := ""
+			if cfg, err := appdb.GetUserConfig(r.Context(), pool, u.ID); err == nil {
+				wn = cfg.WhatsappNumber
+			}
+			rows[i] = adminUserRow{User: u, WhatsappNumber: wn}
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, data{
+			User:       user,
+			Users:      rows,
+			RecentLogs: recentLogs,
+		}); err != nil {
+			log.Printf("admin render: %v", err)
+		}
+	}
+}
+
+func handleAdminToggleUser(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(r.URL.Path, "/")
 		if len(parts) < 4 {
 			http.Error(w, "ID inválido", http.StatusBadRequest)
@@ -766,50 +796,16 @@ func handleAdminToggleUser(pool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, "Usuario no encontrado", http.StatusNotFound)
 			return
 		}
+		wn := ""
+		if cfg, err := appdb.GetUserConfig(r.Context(), pool, targetID); err == nil {
+			wn = cfg.WhatsappNumber
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = rowTmpl.Execute(w, user)
+		_ = adminUserRowTmpl.Execute(w, adminUserRow{User: *user, WhatsappNumber: wn})
 	}
 }
 
 func handleAdminApproveUser(pool *pgxpool.Pool) http.HandlerFunc {
-	rowTmpl := template.Must(template.New("row").Parse(`
-<tr id="user-{{.ID}}">
-  <td>{{.Email}}</td>
-  <td>{{if .IsAdmin}}<span class="badge badge-ok">Admin</span>{{else}}Usuario{{end}}</td>
-  <td>
-    {{if .IsActive}}<span class="badge badge-active">Activo</span>
-    {{else}}<span class="badge badge-inactive">Inactivo</span>{{end}}
-  </td>
-  <td>
-    {{if .IsApproved}}<span class="badge badge-ok">Aprobado</span>
-    {{else}}<span class="badge badge-skip">Pendiente</span>{{end}}
-  </td>
-  <td style="color:#6e6e73;font-size:.825rem">{{.CreatedAt.Format "02/01/2006"}}</td>
-  <td>
-    <button class="btn btn-ghost btn-sm"
-      hx-post="/admin/users/{{.ID}}/toggle"
-      hx-target="#user-{{.ID}}"
-      hx-swap="outerHTML">
-      {{if .IsActive}}Desactivar{{else}}Activar{{end}}
-    </button>
-    {{if not .IsApproved}}
-    <button class="btn btn-ghost btn-sm" style="margin-left:.35rem"
-      hx-post="/admin/users/{{.ID}}/approve"
-      hx-target="#user-{{.ID}}"
-      hx-swap="outerHTML">
-      Aprobar
-    </button>
-    {{end}}
-    <button class="btn btn-ghost btn-sm" style="margin-left:.35rem"
-      hx-post="/admin/users/{{.ID}}/reset-password"
-      hx-target="#reset-result"
-      hx-swap="innerHTML">
-      Reset pwd
-    </button>
-    <a href="/admin/users/{{.ID}}/logs" class="btn btn-ghost btn-sm" style="margin-left:.35rem">Logs</a>
-  </td>
-</tr>`))
-
 	return func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(r.URL.Path, "/")
 		if len(parts) < 4 {
@@ -827,8 +823,12 @@ func handleAdminApproveUser(pool *pgxpool.Pool) http.HandlerFunc {
 			http.Error(w, "Usuario no encontrado", http.StatusNotFound)
 			return
 		}
+		wn := ""
+		if cfg, err := appdb.GetUserConfig(r.Context(), pool, targetID); err == nil {
+			wn = cfg.WhatsappNumber
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = rowTmpl.Execute(w, user)
+		_ = adminUserRowTmpl.Execute(w, adminUserRow{User: *user, WhatsappNumber: wn})
 	}
 }
 
@@ -861,6 +861,59 @@ func handleAdminUserLogs(pool *pgxpool.Pool) http.HandlerFunc {
 		if err := tmpl.Execute(w, data{User: user, TargetUser: targetUser, Logs: logs}); err != nil {
 			log.Printf("admin user logs render: %v", err)
 		}
+	}
+}
+
+func handleAdminSendWhatsapp(pool *pgxpool.Pool, wsClient *ws.Whatsapp) http.HandlerFunc {
+	type result struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	writeJSON := func(w http.ResponseWriter, code int, r result) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(r)
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		parts := strings.Split(r.URL.Path, "/")
+		if len(parts) < 4 {
+			writeJSON(w, http.StatusBadRequest, result{Error: "ID inválido"})
+			return
+		}
+		targetID := parts[3]
+
+		if err := r.ParseForm(); err != nil {
+			writeJSON(w, http.StatusBadRequest, result{Error: "Error parseando formulario"})
+			return
+		}
+		message := strings.TrimSpace(r.FormValue("message"))
+		if message == "" {
+			writeJSON(w, http.StatusBadRequest, result{Error: "El mensaje no puede estar vacío"})
+			return
+		}
+
+		cfg, err := appdb.GetUserConfig(r.Context(), pool, targetID)
+		if err != nil || cfg.WhatsappNumber == "" {
+			writeJSON(w, http.StatusBadRequest, result{Error: "El usuario no tiene número de WhatsApp configurado"})
+			return
+		}
+
+		if wsClient == nil {
+			writeJSON(w, http.StatusServiceUnavailable, result{Error: "Cliente de WhatsApp no configurado en el servidor"})
+			return
+		}
+
+		if _, err := wsClient.SendMessage(cfg.WhatsappNumber, message); err != nil {
+			writeJSON(w, http.StatusInternalServerError, result{Error: err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, result{OK: true})
 	}
 }
 
@@ -923,7 +976,7 @@ func handleAdminResetPassword(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
+func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler, wsClient *ws.Whatsapp) {
 	port := os.Getenv("ADMIN_PORT")
 	if port == "" {
 		port = defaultPort
@@ -952,6 +1005,8 @@ func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler) {
 			handleAdminResetPassword(pool)(w, r)
 		} else if strings.HasSuffix(r.URL.Path, "/logs") {
 			handleAdminUserLogs(pool)(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/send-whatsapp") {
+			handleAdminSendWhatsapp(pool, wsClient)(w, r)
 		} else {
 			http.NotFound(w, r)
 		}
