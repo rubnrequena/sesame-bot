@@ -85,9 +85,20 @@
         <div id="pills-{{.Weekday}}" style="display:flex;flex-wrap:wrap;align-items:center;gap:.3rem;min-height:1.8rem;margin-bottom:.65rem">
           <span id="empty-{{.Weekday}}" style="font-size:.8rem;color:#aeaeb2">Sin override — usa el horario general</span>
         </div>
+        <div class="jitter-row">
+          <span>Variación:</span>
+          <div class="jitter-group" id="jitter-{{.Weekday}}">
+            <button type="button" class="jitter-pill{{if eq .JitterMinutes 0}} active{{end}}" onclick="doSetJitter({{.Weekday}},0,this)">0</button>
+            <button type="button" class="jitter-pill{{if eq .JitterMinutes 5}} active{{end}}" onclick="doSetJitter({{.Weekday}},5,this)">±5</button>
+            <button type="button" class="jitter-pill{{if eq .JitterMinutes 10}} active{{end}}" onclick="doSetJitter({{.Weekday}},10,this)">±10</button>
+            <button type="button" class="jitter-pill{{if eq .JitterMinutes 15}} active{{end}}" onclick="doSetJitter({{.Weekday}},15,this)">±15</button>
+          </div>
+          <span style="font-size:.75rem;color:#aeaeb2">min</span>
+        </div>
         <form method="POST" action="/config/day-overrides" id="form-{{.Weekday}}">
           <input type="hidden" name="weekday" value="{{.Weekday}}">
           <input type="hidden" name="hours" id="hours-{{.Weekday}}" value="">
+          <input type="hidden" name="jitter" id="jitter-input-{{.Weekday}}" value="{{.JitterMinutes}}">
           <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
             <button type="button" class="btn btn-sm btn-ghost" onclick="doOpenModal({{.Weekday}},'{{.Name}}')">+ Añadir hora</button>
             <button type="button" class="btn btn-sm" id="save-{{.Weekday}}" disabled style="display:inline-flex;align-items:center;gap:.35rem" title="Guardar" onclick="doSaveDay({{.Weekday}})">
@@ -335,6 +346,15 @@ function doConfirmHour() {
   doCloseModal();
 }
 
+function doSetJitter(wd, val, btn) {
+  var group = document.getElementById('jitter-' + wd);
+  if (!group) return;
+  group.querySelectorAll('.jitter-pill').forEach(function(b) {
+    b.classList.toggle('active', b === btn);
+  });
+  document.getElementById('jitter-input-' + wd).value = val;
+}
+
 function _doRemove(wd, idx) {
   _dow[wd].splice(idx, 1);
   _doRender(wd);
@@ -351,6 +371,7 @@ function doSaveDay(wd) {
   var body = new URLSearchParams();
   body.set('weekday', wd);
   body.set('hours', hours.join(','));
+  body.set('jitter', document.getElementById('jitter-input-' + wd).value || '0');
   fetch('/config/day-overrides', {
     method: 'POST',
     headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -452,6 +473,8 @@ function doCopyConfirm() {
     var body = new URLSearchParams();
     body.set('weekday', wd);
     body.set('hours', sourceHours.join(','));
+    // Solo se copian las horas: cada día destino conserva su propia variación.
+    body.set('jitter', document.getElementById('jitter-input-' + wd).value || '0');
     return fetch('/config/day-overrides', {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},

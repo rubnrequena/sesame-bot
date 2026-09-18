@@ -260,10 +260,14 @@ type dayOption struct {
 }
 
 type dayOverrideUI struct {
-	Weekday int
-	Name    string
-	Hours   string // interleaved CSV: "09:00,14:00,15:00,18:00"
+	Weekday       int
+	Name          string
+	Hours         string // interleaved CSV: "09:00,14:00,15:00,18:00"
+	JitterMinutes int    // variación aleatoria ± minutos (0, 5, 10 o 15)
 }
+
+// allowedJitterMinutes are the variation steps offered in the UI.
+var allowedJitterMinutes = map[int]bool{0: true, 5: true, 10: true, 15: true}
 
 var dayNamesES = map[time.Weekday]string{
 	time.Monday:    "Lunes",
@@ -319,13 +323,16 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 		var dayOverridesList []dayOverrideUI
 		for _, wd := range []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday, time.Saturday, time.Sunday} {
 			hours := ""
+			jitter := 0
 			if o, ok := overridesMap[int(wd)]; ok {
 				hours = interleaveHours(o.HoursIn, o.HoursOut)
+				jitter = o.JitterMinutes
 			}
 			dayOverridesList = append(dayOverridesList, dayOverrideUI{
-				Weekday: int(wd),
-				Name:    dayNamesES[wd],
-				Hours:   hours,
+				Weekday:       int(wd),
+				Name:          dayNamesES[wd],
+				Hours:         hours,
+				JitterMinutes: jitter,
 			})
 		}
 
@@ -586,6 +593,16 @@ func handleConfigDayOverrides(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		jitter := 0
+		if raw := strings.TrimSpace(r.FormValue("jitter")); raw != "" {
+			v, err := strconv.Atoi(raw)
+			if err != nil || !allowedJitterMinutes[v] {
+				http.Redirect(w, r, "/config?day_override_error=Variación+inválida", http.StatusFound)
+				return
+			}
+			jitter = v
+		}
+
 		times := splitTimes(hours)
 		if len(times) < 2 || len(times)%2 != 0 {
 			http.Redirect(w, r, "/config?day_override_error=El+número+de+horas+debe+ser+par+y+al+menos+2", http.StatusFound)
@@ -609,10 +626,11 @@ func handleConfigDayOverrides(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		override := &models.DayOverride{
-			UserID:   user.ID,
-			Weekday:  weekday,
-			HoursIn:  strings.Join(ins, ","),
-			HoursOut: strings.Join(outs, ","),
+			UserID:        user.ID,
+			Weekday:       weekday,
+			HoursIn:       strings.Join(ins, ","),
+			HoursOut:      strings.Join(outs, ","),
+			JitterMinutes: jitter,
 		}
 
 		if err := appdb.UpsertDayOverride(r.Context(), pool, override); err != nil {

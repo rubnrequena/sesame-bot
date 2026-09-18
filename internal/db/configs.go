@@ -72,7 +72,7 @@ func ClearSesamePassword(ctx context.Context, pool *pgxpool.Pool, userID string)
 
 func GetDayOverrides(ctx context.Context, pool *pgxpool.Pool, userID string) ([]models.DayOverride, error) {
 	rows, err := pool.Query(ctx,
-		`SELECT id, user_id, weekday, hours_in, hours_out FROM day_overrides WHERE user_id=$1`,
+		`SELECT id, user_id, weekday, hours_in, hours_out, jitter_minutes FROM day_overrides WHERE user_id=$1`,
 		userID,
 	)
 	if err != nil {
@@ -83,7 +83,7 @@ func GetDayOverrides(ctx context.Context, pool *pgxpool.Pool, userID string) ([]
 	var overrides []models.DayOverride
 	for rows.Next() {
 		var o models.DayOverride
-		if err := rows.Scan(&o.ID, &o.UserID, &o.Weekday, &o.HoursIn, &o.HoursOut); err != nil {
+		if err := rows.Scan(&o.ID, &o.UserID, &o.Weekday, &o.HoursIn, &o.HoursOut, &o.JitterMinutes); err != nil {
 			return nil, err
 		}
 		overrides = append(overrides, o)
@@ -93,12 +93,13 @@ func GetDayOverrides(ctx context.Context, pool *pgxpool.Pool, userID string) ([]
 
 func UpsertDayOverride(ctx context.Context, pool *pgxpool.Pool, o *models.DayOverride) error {
 	_, err := pool.Exec(ctx,
-		`INSERT INTO day_overrides(user_id, weekday, hours_in, hours_out)
-		 VALUES($1,$2,$3,$4)
+		`INSERT INTO day_overrides(user_id, weekday, hours_in, hours_out, jitter_minutes)
+		 VALUES($1,$2,$3,$4,$5)
 		 ON CONFLICT(user_id, weekday) DO UPDATE SET
-		    hours_in  = EXCLUDED.hours_in,
-		    hours_out = EXCLUDED.hours_out`,
-		o.UserID, o.Weekday, o.HoursIn, o.HoursOut,
+		    hours_in       = EXCLUDED.hours_in,
+		    hours_out      = EXCLUDED.hours_out,
+		    jitter_minutes = EXCLUDED.jitter_minutes`,
+		o.UserID, o.Weekday, o.HoursIn, o.HoursOut, o.JitterMinutes,
 	)
 	return err
 }

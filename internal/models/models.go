@@ -29,11 +29,12 @@ type UserConfig struct {
 }
 
 type DayOverride struct {
-	ID       string
-	UserID   string
-	Weekday  int // time.Weekday value
-	HoursIn  string
-	HoursOut string
+	ID            string
+	UserID        string
+	Weekday       int // time.Weekday value
+	HoursIn       string
+	HoursOut      string
+	JitterMinutes int // variación aleatoria ± minutos por fichaje
 }
 
 type CheckinLog struct {

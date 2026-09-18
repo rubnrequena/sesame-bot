@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -47,6 +48,9 @@ func New(pool *pgxpool.Pool, encKey []byte, fn RunActionFn, wsClient *ws.Whatsap
 
 func (s *Scheduler) Run(ctx context.Context) {
 	executed := make(map[string]map[string]bool)
+	// Random offsets rolled once per entry and kept for the day, so the target
+	// minute doesn't drift on every 30s tick. Cleared on day change / restart.
+	jitterOffsets := make(map[string]int)
 	lastDate := ""
 
 	log.Println("Scheduler multi-usuario iniciado")
@@ -63,6 +67,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 		if today != lastDate {
 			executed = make(map[string]map[string]bool)
+			jitterOffsets = make(map[string]int)
 			lastDate = today
 			log.Printf("Scheduler: nuevo día %s", today)
 		}
@@ -80,7 +85,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 				continue
 			}
 
-			schedule := buildSchedule(uw, now.Weekday())
+			schedule := buildSchedule(uw, now, jitterOffsets)
 			if len(schedule) == 0 {
 				continue
 			}
@@ -158,26 +163,71 @@ type scheduledEntry struct {
 }
 
 // buildSchedule returns the scheduled entries for the given day using only day_overrides.
-// Days without an override are inactive (return nil).
-func buildSchedule(uw models.UserWithConfig, day time.Weekday) []scheduledEntry {
+// Days without an override are inactive (return nil). Each entry has its configured
+// jitter applied, using the shared offsets map as a per-day roll cache.
+func buildSchedule(uw models.UserWithConfig, now time.Time, jitterOffsets map[string]int) []scheduledEntry {
+	date := now.Format("2006-01-02")
 	for _, o := range uw.DayOverrides {
-		if time.Weekday(o.Weekday) != day {
+		if time.Weekday(o.Weekday) != now.Weekday() {
 			continue
 		}
 		var entries []scheduledEntry
+		idx := 0
 		for _, raw := range splitCSV(o.HoursIn) {
-			if h, m, ok := parseHHMM(raw); ok {
-				entries = append(entries, scheduledEntry{h, m, "IN"})
+			h, m, ok := parseHHMM(raw)
+			if !ok {
+				continue
 			}
+			jh, jm := jitterTime(uw.User.ID, date, "IN", idx, h, m, o.JitterMinutes, jitterOffsets)
+			entries = append(entries, scheduledEntry{jh, jm, "IN"})
+			idx++
 		}
 		for _, raw := range splitCSV(o.HoursOut) {
-			if h, m, ok := parseHHMM(raw); ok {
-				entries = append(entries, scheduledEntry{h, m, "OUT"})
+			h, m, ok := parseHHMM(raw)
+			if !ok {
+				continue
 			}
+			jh, jm := jitterTime(uw.User.ID, date, "OUT", idx, h, m, o.JitterMinutes, jitterOffsets)
+			entries = append(entries, scheduledEntry{jh, jm, "OUT"})
+			idx++
 		}
 		return entries
 	}
 	return nil // día sin override = inactivo
+}
+
+// jitterTime shifts baseHour:baseMinute by a random offset in [-jitter, +jitter]
+// minutes, clamped to the same day. The offset is rolled once and cached in
+// offsets so it stays stable across scheduler ticks; a restart rolls again.
+// Replacing the day/config changes the cache key and therefore re-rolls.
+func jitterTime(userID, date, action string, idx, baseHour, baseMinute, jitter int, offsets map[string]int) (int, int) {
+	if jitter <= 0 {
+		return baseHour, baseMinute
+	}
+	key := fmt.Sprintf("%s|%s|%s|%d|%02d:%02d|%d", userID, date, action, idx, baseHour, baseMinute, jitter)
+	offset, cached := offsets[key]
+	if !cached {
+		offset = rand.IntN(2*jitter+1) - jitter
+		offsets[key] = offset
+	}
+
+	hour, minute := clampToDay(baseHour*60 + baseMinute + offset)
+	if !cached {
+		log.Printf("Scheduler [%s]: %s base %02d:%02d ±%dmin -> %02d:%02d",
+			userID, action, baseHour, baseMinute, jitter, hour, minute)
+	}
+	return hour, minute
+}
+
+// clampToDay keeps totalMinutes within 00:00–23:59 and returns hour/minute.
+func clampToDay(totalMinutes int) (int, int) {
+	if totalMinutes < 0 {
+		totalMinutes = 0
+	}
+	if max := 23*60 + 59; totalMinutes > max {
+		totalMinutes = max
+	}
+	return totalMinutes / 60, totalMinutes % 60
 }
 
 func splitCSV(s string) []string {

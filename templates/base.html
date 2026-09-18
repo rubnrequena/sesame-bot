@@ -218,6 +218,18 @@
     .acc-body { display: none; padding: .75rem 1rem 1rem; border-top: 1.5px solid #f0f0f5; }
     .acc-item.open .acc-body { display: block; }
 
+    /* ── Day jitter pills ───────────────────────────────── */
+    .jitter-row { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; margin-bottom: .65rem; }
+    .jitter-row > span { font-size: .8rem; color: #6e6e73; }
+    .jitter-group { display: flex; gap: .3rem; }
+    .jitter-pill {
+      padding: .25rem .65rem; border-radius: 20px; font-size: .8rem; font-weight: 600;
+      border: 1.5px solid #e0e0e5; background: #fff; color: #6e6e73;
+      cursor: pointer; font-family: inherit; line-height: 1.2;
+    }
+    .jitter-pill:hover { border-color: #0071e3; color: #0071e3; }
+    .jitter-pill.active { background: #eaf4ff; border-color: #0071e3; color: #0071e3; }
+
     /* ── Stats grid (dashboard) ─────────────────────────── */
     .stats-grid {
       display: grid;
