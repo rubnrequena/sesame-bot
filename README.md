@@ -88,13 +88,24 @@ Al guardar, los cambios se aplican **inmediatamente** al scheduler en memoria y 
 
 ## 🐳 Docker
 
+Las releases se versionan con SemVer (fuente de verdad: archivo `VERSION`).
+
 ```bash
-# Construir imagen
+# Consultar la versión actual
+make version
+
+# Construir imagen local (rubn1987/sesame-bot:vX.Y.Z)
 make build
 
-# Ejecutar
-docker run -v $(pwd)/.env:/app/.env --env-file .env -p 8080:8080 rubn1987/sesame-bot:latest
+# Publicar en Docker Hub
+make release
+
+# Ejecutar (ajusta el tag a la versión publicada)
+docker run -v $(pwd)/.env:/app/.env --env-file .env -p 8080:8080 rubn1987/sesame-bot:v0.1.0
 ```
+
+Para sacar una nueva release: edita `VERSION`, haz commit y ejecuta `make release`.
+La versión embebida aparece en el primer log al arrancar (`Sesame Bot vX.Y.Z arrancando`).
 
 ## 🛠️ Cómo funciona
 

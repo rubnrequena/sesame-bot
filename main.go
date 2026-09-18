@@ -36,6 +36,10 @@ const (
 	actionOut actionType = "OUT"
 )
 
+// version is overridden at build time via -ldflags "-X main.version=vX.Y.Z"
+// (Dockerfile reads it from ./VERSION). "dev" for local builds.
+var version = "dev"
+
 type location struct {
 	lat float64
 	lon float64
@@ -78,6 +82,8 @@ type holidaysPage struct {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
+	log.Printf("Sesame Bot %s arrancando", version)
+
 	// Load .env if present (local dev); in Docker vars come via --env-file
 	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
 		log.Printf("Aviso cargando .env: %v", err)

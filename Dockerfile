@@ -7,15 +7,18 @@ WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download
 
+# Versión (fuente de verdad compartida con el Makefile)
+COPY VERSION ./
+
 # Código fuente y recursos embebidos
 COPY *.go ./
 COPY internal/ ./internal/
 COPY migrations/ ./migrations/
 COPY templates/ ./templates/
 
-# Compilar binario estático
+# Compilar binario estático embebiendo la versión (visible en el log de arranque)
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -o sesame-bot .
+    go build -ldflags="-s -w -X main.version=v$(cat VERSION)" -o sesame-bot .
 
 # ─── Stage 2: Runtime ─────────────────────────────────────────────────────────
 # Imagen oficial de Rod: incluye Chromium + todas las dependencias
