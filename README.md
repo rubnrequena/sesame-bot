@@ -101,7 +101,7 @@ make build
 make release
 
 # Ejecutar (ajusta el tag a la versión publicada)
-docker run -v $(pwd)/.env:/app/.env --env-file .env -p 8080:8080 rubn1987/sesame-bot:v0.1.0
+docker run -v $(pwd)/.env:/app/.env --env-file .env -p 8080:8080 rubn1987/sesame-bot:v0.2.0
 ```
 
 Para sacar una nueva release: edita `VERSION`, haz commit y ejecuta `make release`.

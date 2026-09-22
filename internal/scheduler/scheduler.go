@@ -51,6 +51,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// Random offsets rolled once per entry and kept for the day, so the target
 	// minute doesn't drift on every 30s tick. Cleared on day change / restart.
 	jitterOffsets := make(map[string]int)
+	// Without-replacement offset bags, one per user+day. Cleared on day change.
+	jitterBags := make(map[string]*jitterDay)
 	lastDate := ""
 
 	log.Println("Scheduler multi-usuario iniciado")
@@ -68,6 +70,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 		if today != lastDate {
 			executed = make(map[string]map[string]bool)
 			jitterOffsets = make(map[string]int)
+			jitterBags = make(map[string]*jitterDay)
 			lastDate = today
 			log.Printf("Scheduler: nuevo día %s", today)
 		}
@@ -85,7 +88,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 				continue
 			}
 
-			schedule := buildSchedule(uw, now, jitterOffsets)
+			schedule := buildSchedule(uw, now, jitterOffsets, jitterBags)
 			if len(schedule) == 0 {
 				continue
 			}
@@ -164,8 +167,8 @@ type scheduledEntry struct {
 
 // buildSchedule returns the scheduled entries for the given day using only day_overrides.
 // Days without an override are inactive (return nil). Each entry has its configured
-// jitter applied, using the shared offsets map as a per-day roll cache.
-func buildSchedule(uw models.UserWithConfig, now time.Time, jitterOffsets map[string]int) []scheduledEntry {
+// jitter applied, drawing offsets without replacement from the user's day bag.
+func buildSchedule(uw models.UserWithConfig, now time.Time, jitterOffsets map[string]int, jitterBags map[string]*jitterDay) []scheduledEntry {
 	date := now.Format("2006-01-02")
 	for _, o := range uw.DayOverrides {
 		if time.Weekday(o.Weekday) != now.Weekday() {
@@ -178,7 +181,7 @@ func buildSchedule(uw models.UserWithConfig, now time.Time, jitterOffsets map[st
 			if !ok {
 				continue
 			}
-			jh, jm := jitterTime(uw.User.ID, date, "IN", idx, h, m, o.JitterMinutes, jitterOffsets)
+			jh, jm := jitterTime(uw.User.ID, date, "IN", idx, h, m, o.JitterMinutes, jitterOffsets, jitterBags)
 			entries = append(entries, scheduledEntry{jh, jm, "IN"})
 			idx++
 		}
@@ -187,7 +190,7 @@ func buildSchedule(uw models.UserWithConfig, now time.Time, jitterOffsets map[st
 			if !ok {
 				continue
 			}
-			jh, jm := jitterTime(uw.User.ID, date, "OUT", idx, h, m, o.JitterMinutes, jitterOffsets)
+			jh, jm := jitterTime(uw.User.ID, date, "OUT", idx, h, m, o.JitterMinutes, jitterOffsets, jitterBags)
 			entries = append(entries, scheduledEntry{jh, jm, "OUT"})
 			idx++
 		}
@@ -196,27 +199,65 @@ func buildSchedule(uw models.UserWithConfig, now time.Time, jitterOffsets map[st
 	return nil // día sin override = inactivo
 }
 
+// jitterDay is the per-user, per-day without-replacement bag of jitter offsets.
+type jitterDay struct {
+	jitter    int   // range the bag was filled for
+	remaining []int // offsets not drawn yet
+}
+
 // jitterTime shifts baseHour:baseMinute by a random offset in [-jitter, +jitter]
-// minutes, clamped to the same day. The offset is rolled once and cached in
-// offsets so it stays stable across scheduler ticks; a restart rolls again.
-// Replacing the day/config changes the cache key and therefore re-rolls.
-func jitterTime(userID, date, action string, idx, baseHour, baseMinute, jitter int, offsets map[string]int) (int, int) {
+// minutes, clamped to the same day. Offsets are drawn without replacement from the
+// per-user, per-day bag (keyed by userID|date), so no offset repeats within the day
+// until the bag is exhausted; IN and OUT share the same bag. The chosen offset is
+// cached in offsets so it stays stable across scheduler ticks; a restart re-rolls.
+func jitterTime(userID, date, action string, idx, baseHour, baseMinute, jitter int, offsets map[string]int, bags map[string]*jitterDay) (int, int) {
 	if jitter <= 0 {
 		return baseHour, baseMinute
 	}
 	key := fmt.Sprintf("%s|%s|%s|%d|%02d:%02d|%d", userID, date, action, idx, baseHour, baseMinute, jitter)
 	offset, cached := offsets[key]
 	if !cached {
-		offset = rand.IntN(2*jitter+1) - jitter
+		bagKey := userID + "|" + date
+		bag, ok := bags[bagKey]
+		if !ok {
+			bag = &jitterDay{}
+			bags[bagKey] = bag
+		}
+		offset = drawJitterOffset(bag, jitter, userID)
 		offsets[key] = offset
-	}
 
-	hour, minute := clampToDay(baseHour*60 + baseMinute + offset)
-	if !cached {
-		log.Printf("Scheduler [%s]: %s base %02d:%02d ±%dmin -> %02d:%02d",
-			userID, action, baseHour, baseMinute, jitter, hour, minute)
+		hour, minute := clampToDay(baseHour*60 + baseMinute + offset)
+		log.Printf("Scheduler [%s]: %s base %02d:%02d ±%dmin -> %02d:%02d (offset %+d, quedan %d/%d)",
+			userID, action, baseHour, baseMinute, jitter, hour, minute, offset, len(bag.remaining), 2*jitter+1)
+		return hour, minute
 	}
-	return hour, minute
+	return clampToDay(baseHour*60 + baseMinute + offset)
+}
+
+// drawJitterOffset removes and returns a random offset in [-jitter, +jitter] that
+// this user has not used yet today. The bag is refilled when it runs out (new
+// round) or when the configured range changes.
+func drawJitterOffset(bag *jitterDay, jitter int, userID string) int {
+	if bag.jitter != jitter || len(bag.remaining) == 0 {
+		if bag.jitter == jitter {
+			log.Printf("Scheduler [%s]: bolsa de jitter agotada, nueva ronda (%d valores)", userID, 2*jitter+1)
+		}
+		bag.jitter = jitter
+		bag.remaining = allOffsets(jitter)
+	}
+	i := rand.IntN(len(bag.remaining))
+	offset := bag.remaining[i]
+	bag.remaining = append(bag.remaining[:i], bag.remaining[i+1:]...)
+	return offset
+}
+
+// allOffsets returns every whole-minute offset in [-jitter, +jitter].
+func allOffsets(jitter int) []int {
+	offsets := make([]int, 0, 2*jitter+1)
+	for o := -jitter; o <= jitter; o++ {
+		offsets = append(offsets, o)
+	}
+	return offsets
 }
 
 // clampToDay keeps totalMinutes within 00:00–23:59 and returns hour/minute.
