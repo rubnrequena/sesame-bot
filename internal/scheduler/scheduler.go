@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,6 +55,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 	jitterOffsets := make(map[string]int)
 	// Without-replacement offset bags, one per user+day. Cleared on day change.
 	jitterBags := make(map[string]*jitterDay)
+	// Users already sent the morning reminder today. Cleared on day change.
+	morningNotified := make(map[string]bool)
 	lastDate := ""
 
 	log.Println("Scheduler multi-usuario iniciado")
@@ -71,6 +75,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			executed = make(map[string]map[string]bool)
 			jitterOffsets = make(map[string]int)
 			jitterBags = make(map[string]*jitterDay)
+			morningNotified = make(map[string]bool)
 			lastDate = today
 			log.Printf("Scheduler: nuevo día %s", today)
 		}
@@ -96,6 +101,19 @@ func (s *Scheduler) Run(ctx context.Context) {
 			uid := uw.User.ID
 			if _, ok := executed[uid]; !ok {
 				executed[uid] = make(map[string]bool)
+			}
+
+			// Morning reminder: one hour before the first IN of the day. Skipped on
+			// days without an IN or when the target falls before midnight.
+			if firstIN, ok := firstEntryOfType(schedule, "IN"); ok {
+				earliest := firstIN.hour*60 + firstIN.minute
+				notifyMin := earliest - 60
+				if notifyMin >= 0 && now.Hour() == notifyMin/60 && now.Minute() == notifyMin%60 && !morningNotified[uid] {
+					morningNotified[uid] = true
+					locLabel := locationLabelForDay(uw.Config.OfficeDays, now.Weekday())
+					whatsappNumber := uw.Config.WhatsappNumber
+					go s.sendMorningReminder(uid, whatsappNumber, locLabel, schedule)
+				}
 			}
 
 			for _, st := range schedule {
@@ -316,6 +334,67 @@ func (s *Scheduler) sendWhatsappNotification(uid, action, status, locLabel, errM
 	if _, wsErr := s.wsClient.SendMessage(whatsappNumber, text); wsErr != nil {
 		log.Printf("Scheduler [%s]: error enviando WhatsApp: %v", uid, wsErr)
 	}
+}
+
+// sendMorningReminder sends a good-morning WhatsApp message ahead of the first
+// check-in of the day, listing the day's location and every scheduled time
+// (with jitter already applied). No-op when the client or number is missing.
+func (s *Scheduler) sendMorningReminder(uid, whatsappNumber, locLabel string, entries []scheduledEntry) {
+	if s.wsClient == nil || whatsappNumber == "" {
+		return
+	}
+
+	text := fmt.Sprintf("☀️ Buenos días\n\n📍 Ubicación: %s\n%s", locLabel, formatSchedule(entries))
+	if _, wsErr := s.wsClient.SendMessage(whatsappNumber, text); wsErr != nil {
+		log.Printf("Scheduler [%s]: error enviando recordatorio matinal: %v", uid, wsErr)
+	}
+}
+
+// firstEntryOfType returns the earliest entry matching action ("IN" or "OUT").
+func firstEntryOfType(entries []scheduledEntry, action string) (scheduledEntry, bool) {
+	var first scheduledEntry
+	found := false
+	for _, e := range entries {
+		if e.action != action {
+			continue
+		}
+		if !found || e.hour*60+e.minute < first.hour*60+first.minute {
+			first = e
+			found = true
+		}
+	}
+	return first, found
+}
+
+// locationLabelForDay reports whether the given weekday is configured as an
+// office day, returning "Oficina" or "Casa".
+func locationLabelForDay(officeDays string, day time.Weekday) string {
+	raw := strings.ReplaceAll(officeDays, "=", ",")
+	for _, part := range splitCSV(raw) {
+		if strings.EqualFold(strings.TrimSpace(part), day.String()) {
+			return "Oficina"
+		}
+	}
+	return "Casa"
+}
+
+// formatSchedule renders the day's check-ins sorted by time as WhatsApp lines.
+func formatSchedule(entries []scheduledEntry) string {
+	sorted := make([]scheduledEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].hour*60+sorted[i].minute < sorted[j].hour*60+sorted[j].minute
+	})
+
+	var b strings.Builder
+	for _, e := range sorted {
+		icon, label := "🟢", "Entrada"
+		if e.action == "OUT" {
+			icon, label = "🔴", "Salida"
+		}
+		fmt.Fprintf(&b, "%s %s: %02d:%02d\n", icon, label, e.hour, e.minute)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func parseHHMM(raw string) (int, int, bool) {

@@ -10,6 +10,7 @@ Incluye una **interfaz web de administración** para modificar la configuración
 - **Horarios flexibles:** Soporta horario genérico semanal y overrides por día específico.
 - **Control de fin de semana:** Configurable para ejecutar solo en días laborables.
 - **Geolocalización:** Simula ubicación GPS diferente según si el día es de oficina o teletrabajo.
+- **Notificaciones WhatsApp:** Aviso tras cada fichaje (éxito, error u omisión) y **recordatorio matinal** una hora antes del primer fichaje del día.
 - **UI de administración:** Formulario web protegido por contraseña para editar la configuración sin tocar el `.env`.
 
 ## ⚙️ Configuración
@@ -118,6 +119,25 @@ La versión embebida aparece en el primer log al arrancar (`Sesame Bot vX.Y.Z ar
    - Navega a `https://app.sesametime.com/login` y hace login
    - Pulsa `Entrar` o `Salir` según corresponda
    - Espera 5 segundos y cierra sesión
+
+## 🔔 Notificaciones WhatsApp
+
+Requieren `EVOLUTION_ENABLED=true` y un número configurado en el campo **WhatsApp** de cada usuario. Se envían dos tipos:
+
+1. **Recordatorio matinal:** una hora antes del primer fichaje de entrada (`IN`) del día. Incluye la ubicación del día (Oficina/Casa) y todas las horas programadas con su jitter ya aplicado. Si el día no tiene fichajes (p. ej. fin de semana), no se envía nada.
+2. **Resultado de fichaje:** tras cada intento, con el estado (✅ registrado, ❌ error o ⏭️ omitido).
+
+Ejemplo de recordatorio con varios fichajes (entrada a las 09:04 → aviso a las 08:04):
+
+```
+☀️ Buenos días
+
+📍 Ubicación: Oficina
+🟢 Entrada: 09:04
+🔴 Salida: 13:01
+🟢 Entrada: 14:03
+🔴 Salida: 17:57
+```
 
 ## 🐛 Troubleshooting
 
