@@ -327,6 +327,7 @@ func splitCSV(s string) []string {
 // de WhatsApp, número vacío o el día no tiene fichajes programados.
 func (s *Scheduler) NotifyScheduleChanged(uid string) {
 	if s.wsClient == nil {
+		log.Printf("Scheduler [%s]: aviso de horario omitido: cliente WhatsApp no configurado (EVOLUTION_*)", uid)
 		return
 	}
 	uw, err := db.LoadUserWithConfig(context.Background(), s.pool, uid)
@@ -335,6 +336,7 @@ func (s *Scheduler) NotifyScheduleChanged(uid string) {
 		return
 	}
 	if uw.Config.WhatsappNumber == "" {
+		log.Printf("Scheduler [%s]: aviso de horario omitido: usuario sin número de WhatsApp en su config", uid)
 		return
 	}
 
@@ -357,6 +359,7 @@ func (s *Scheduler) NotifyScheduleChanged(uid string) {
 // It is a no-op when the client is nil, the number is empty, or EVOLUTION_ENABLED != "true".
 func (s *Scheduler) sendWhatsappNotification(uid, action, status, locLabel, errMsg, whatsappNumber string) {
 	if s.wsClient == nil || whatsappNumber == "" {
+		log.Printf("Scheduler [%s]: notificación de resultado omitida: sin cliente WhatsApp o número vacío", uid)
 		return
 	}
 
@@ -387,6 +390,7 @@ func (s *Scheduler) sendWhatsappNotification(uid, action, status, locLabel, errM
 // (with jitter already applied). No-op when the client or number is missing.
 func (s *Scheduler) sendMorningReminder(uid, whatsappNumber, locLabel string, entries []scheduledEntry) {
 	if s.wsClient == nil || whatsappNumber == "" {
+		log.Printf("Scheduler [%s]: recordatorio matinal omitido: sin cliente WhatsApp o número vacío", uid)
 		return
 	}
 

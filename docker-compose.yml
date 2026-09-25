@@ -17,7 +17,7 @@ services:
       - sesame-net
 
   sesame-bot:
-    image: rubn1987/sesame-bot:v0.2.0
+    image: rubn1987/sesame-bot:v0.3.0
     restart: unless-stopped
     depends_on:
       postgres:
