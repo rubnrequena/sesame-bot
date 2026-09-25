@@ -436,6 +436,7 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 		}
 
 		log.Printf("Config actualizada para usuario %s", user.ID)
+		go sched.NotifyScheduleChanged(user.ID)
 		render(w, buildData(r, user, true, "", false, ""))
 	}
 }
@@ -564,7 +565,7 @@ func handleConfigAccountPassword(pool *pgxpool.Pool) http.HandlerFunc {
 
 // ─── Day overrides ────────────────────────────────────────────────────────────
 
-func handleConfigDayOverrides(pool *pgxpool.Pool) http.HandlerFunc {
+func handleConfigDayOverrides(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user := currentUser(r)
 		if !user.IsApproved {
@@ -589,6 +590,7 @@ func handleConfigDayOverrides(pool *pgxpool.Pool) http.HandlerFunc {
 			if err := appdb.DeleteDayOverride(r.Context(), pool, user.ID, weekday); err != nil {
 				log.Printf("handleConfigDayOverrides delete: %v", err)
 			}
+			go sched.NotifyScheduleChanged(user.ID)
 			http.Redirect(w, r, "/config?day_override_success=1", http.StatusFound)
 			return
 		}
@@ -639,6 +641,7 @@ func handleConfigDayOverrides(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
+		go sched.NotifyScheduleChanged(user.ID)
 		http.Redirect(w, r, "/config?day_override_success=1", http.StatusFound)
 	}
 }
@@ -1010,7 +1013,7 @@ func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler, wsClient *ws
 	mux.HandleFunc("/config", requireAuth(pool, handleConfig(pool, sched)))
 	mux.HandleFunc("/config/password", requireAuth(pool, handleConfigPassword(pool, sched)))
 	mux.HandleFunc("/config/account-password", requireAuth(pool, handleConfigAccountPassword(pool)))
-	mux.HandleFunc("/config/day-overrides", requireAuth(pool, handleConfigDayOverrides(pool)))
+	mux.HandleFunc("/config/day-overrides", requireAuth(pool, handleConfigDayOverrides(pool, sched)))
 	mux.HandleFunc("/logs", requireAuth(pool, handleLogs(pool)))
 
 	mux.HandleFunc("/admin", requireAdmin(pool, handleAdmin(pool)))

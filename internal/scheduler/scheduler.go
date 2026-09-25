@@ -32,6 +32,13 @@ type Scheduler struct {
 	MemPasswords sync.Map // map[userID string] -> plaintext password
 	runAction    RunActionFn
 	wsClient     *ws.Whatsapp
+
+	// Estado de jitter compartido entre el loop Run y las notificaciones
+	// disparadas desde la web, para que ambas vean los mismos offsets ya
+	// sorteados del día. Protegido por schedMu.
+	schedMu       sync.Mutex
+	jitterOffsets map[string]int
+	jitterBags    map[string]*jitterDay
 }
 
 // RunActionFn is the type of the function provided by main to do the actual browser automation.
@@ -45,16 +52,18 @@ type RunActionFn func(
 ) (string, error)
 
 func New(pool *pgxpool.Pool, encKey []byte, fn RunActionFn, wsClient *ws.Whatsapp) *Scheduler {
-	return &Scheduler{pool: pool, encKey: encKey, runAction: fn, wsClient: wsClient}
+	return &Scheduler{
+		pool:          pool,
+		encKey:        encKey,
+		runAction:     fn,
+		wsClient:      wsClient,
+		jitterOffsets: make(map[string]int),
+		jitterBags:    make(map[string]*jitterDay),
+	}
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
 	executed := make(map[string]map[string]bool)
-	// Random offsets rolled once per entry and kept for the day, so the target
-	// minute doesn't drift on every 30s tick. Cleared on day change / restart.
-	jitterOffsets := make(map[string]int)
-	// Without-replacement offset bags, one per user+day. Cleared on day change.
-	jitterBags := make(map[string]*jitterDay)
 	// Users already sent the morning reminder today. Cleared on day change.
 	morningNotified := make(map[string]bool)
 	lastDate := ""
@@ -73,8 +82,10 @@ func (s *Scheduler) Run(ctx context.Context) {
 
 		if today != lastDate {
 			executed = make(map[string]map[string]bool)
-			jitterOffsets = make(map[string]int)
-			jitterBags = make(map[string]*jitterDay)
+			s.schedMu.Lock()
+			s.jitterOffsets = make(map[string]int)
+			s.jitterBags = make(map[string]*jitterDay)
+			s.schedMu.Unlock()
 			morningNotified = make(map[string]bool)
 			lastDate = today
 			log.Printf("Scheduler: nuevo día %s", today)
@@ -93,7 +104,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 				continue
 			}
 
-			schedule := buildSchedule(uw, now, jitterOffsets, jitterBags)
+			s.schedMu.Lock()
+			schedule := buildSchedule(uw, now, s.jitterOffsets, s.jitterBags)
+			s.schedMu.Unlock()
 			if len(schedule) == 0 {
 				continue
 			}
@@ -305,6 +318,39 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// NotifyScheduleChanged envía por WhatsApp el horario de hoy (equivalente al
+// recordatorio matinal) tras una modificación de la configuración del usuario
+// desde la web. Usa los mismos offsets de jitter ya sorteados por el loop, así
+// que muestra exactamente las horas que se ejecutarán. No-op si no hay cliente
+// de WhatsApp, número vacío o el día no tiene fichajes programados.
+func (s *Scheduler) NotifyScheduleChanged(uid string) {
+	if s.wsClient == nil {
+		return
+	}
+	uw, err := db.LoadUserWithConfig(context.Background(), s.pool, uid)
+	if err != nil {
+		log.Printf("Scheduler [%s]: NotifyScheduleChanged: cargando usuario: %v", uid, err)
+		return
+	}
+	if uw.Config.WhatsappNumber == "" {
+		return
+	}
+
+	now := time.Now()
+	s.schedMu.Lock()
+	schedule := buildSchedule(uw, now, s.jitterOffsets, s.jitterBags)
+	s.schedMu.Unlock()
+	if len(schedule) == 0 {
+		return
+	}
+
+	locLabel := locationLabelForDay(uw.Config.OfficeDays, now.Weekday())
+	text := fmt.Sprintf("✏️ Horario actualizado\n\n📍 Ubicación: %s\n%s", locLabel, formatSchedule(schedule))
+	if _, wsErr := s.wsClient.SendMessage(uw.Config.WhatsappNumber, text); wsErr != nil {
+		log.Printf("Scheduler [%s]: error enviando aviso de horario actualizado: %v", uid, wsErr)
+	}
 }
 
 // sendWhatsappNotification sends a WhatsApp message to the user after a check-in attempt.

@@ -98,6 +98,39 @@ func ToggleUserActive(ctx context.Context, pool *pgxpool.Pool, id string) error 
 	return err
 }
 
+// LoadUserWithConfig carga un único usuario con su config y day overrides.
+// Devuelve pgx.ErrNoRows si el usuario no existe.
+func LoadUserWithConfig(ctx context.Context, pool *pgxpool.Pool, userID string) (models.UserWithConfig, error) {
+	var uw models.UserWithConfig
+	u := &uw.User
+	c := &uw.Config
+	err := pool.QueryRow(ctx,
+		`SELECT u.id, u.email, u.is_admin, u.is_active, u.created_at, u.updated_at,
+		        c.id, c.user_id, c.sesame_email, c.sesame_password_enc,
+		        c.location_office_lat, c.location_office_lon,
+		        c.location_home_lat, c.location_home_lon,
+		        c.office_days, c.whatsapp_number
+		 FROM users u
+		 JOIN user_configs c ON c.user_id = u.id
+		 WHERE u.id=$1`, userID,
+	).Scan(
+		&u.ID, &u.Email, &u.IsAdmin, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
+		&c.ID, &c.UserID, &c.SesameEmail, &c.SesamePasswordEnc,
+		&c.LocationOfficeLat, &c.LocationOfficeLon,
+		&c.LocationHomeLat, &c.LocationHomeLon,
+		&c.OfficeDays, &c.WhatsappNumber,
+	)
+	if err != nil {
+		return uw, err
+	}
+	overrides, err := GetDayOverrides(ctx, pool, userID)
+	if err != nil {
+		return uw, err
+	}
+	uw.DayOverrides = overrides
+	return uw, nil
+}
+
 func LoadActiveUsersWithConfig(ctx context.Context, pool *pgxpool.Pool) ([]models.UserWithConfig, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT u.id, u.email, u.is_admin, u.is_active, u.created_at, u.updated_at,

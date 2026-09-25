@@ -126,6 +126,7 @@ Requieren `EVOLUTION_ENABLED=true` y un número configurado en el campo **WhatsA
 
 1. **Recordatorio matinal:** una hora antes del primer fichaje de entrada (`IN`) del día. Incluye la ubicación del día (Oficina/Casa) y todas las horas programadas con su jitter ya aplicado. Si el día no tiene fichajes (p. ej. fin de semana), no se envía nada.
 2. **Resultado de fichaje:** tras cada intento, con el estado (✅ registrado, ❌ error o ⏭️ omitido).
+3. **Horario actualizado:** cuando el usuario guarda cambios en su configuración o en los horarios de un día, envía el mismo resumen que el recordatorio matinal (ubicación + horas con jitter ya aplicado) para confirmar al instante cómo ha quedado el horario de hoy. No se envía si el día no tiene fichajes o el usuario no tiene WhatsApp configurado.
 
 Ejemplo de recordatorio con varios fichajes (entrada a las 09:04 → aviso a las 08:04):
 
