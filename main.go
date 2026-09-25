@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -320,6 +321,21 @@ func runAction(cfg config, action actionType) (string, error) {
 	waitHolidays := startHolidayCapture(page, logger)
 
 	loc := getLocationForDay(cfg, day)
+
+	// Concede el permiso de geolocalización SIEMPRE: cada ejecución arranca un
+	// Chrome nuevo sin preferencias, y sin el permiso concedido la SPA de
+	// Sesame no muestra el botón de fichar, aunque la posición esté simulada.
+	// El origen debe ser scheme://host sin path (formato que exige CDP).
+	permCmd := proto.BrowserGrantPermissions{
+		Permissions: []proto.BrowserPermissionType{
+			proto.BrowserPermissionTypeGeolocation,
+		},
+		Origin: originOf(loginURL),
+	}
+	if err := permCmd.Call(browser); err != nil {
+		return "", fmt.Errorf("conceder permiso de geolocalización: %w", err)
+	}
+
 	if loc.lat != 0 || loc.lon != 0 {
 		accuracy := 10.0
 		geoCmd := proto.EmulationSetGeolocationOverride{
@@ -330,16 +346,9 @@ func runAction(cfg config, action actionType) (string, error) {
 		if err := geoCmd.Call(page); err != nil {
 			return "", fmt.Errorf("establecer geolocalización: %w", err)
 		}
-		permCmd := proto.BrowserGrantPermissions{
-			Permissions: []proto.BrowserPermissionType{
-				proto.BrowserPermissionTypeGeolocation,
-			},
-			Origin: loginURL,
-		}
-		if err := permCmd.Call(browser); err != nil {
-			return "", fmt.Errorf("conceder permiso de geolocalización: %w", err)
-		}
 		logger.Printf("Geolocalización aplicada: %.6f, %.6f", loc.lat, loc.lon)
+	} else {
+		logger.Println("Sin coordenadas configuradas — se concede permiso GPS y se usa la ubicación por defecto del navegador")
 	}
 
 	logger.Println("Navegando al login...")
@@ -386,10 +395,12 @@ func runAction(cfg config, action actionType) (string, error) {
 	}
 
 	logger.Printf("Buscando botón %q...", buttonText)
-	btn, err := waitForElementByText(page, "span", buttonText)
+	btn, via, err := waitForClickByText(page, buttonText, pageTimeout)
 	if err != nil {
+		debugDumpUI(page, logger)
 		return "", fmt.Errorf("buscar botón %q: %w", buttonText, err)
 	}
+	logger.Printf("Botón %q localizado (%s)", buttonText, via)
 	if err := btn.WaitVisible(); err != nil {
 		return "", fmt.Errorf("esperar visibilidad de botón: %w", err)
 	}
@@ -399,7 +410,7 @@ func runAction(cfg config, action actionType) (string, error) {
 		return locLabel, nil
 	}
 
-	if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
+	if err := clickElement(page, btn); err != nil {
 		return "", fmt.Errorf("click en botón %q: %w", buttonText, err)
 	}
 	logger.Printf("Click en %q realizado. Esperando 5 segundos...", buttonText)
@@ -475,32 +486,130 @@ func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 }
 
 func doLogout(page *rod.Page, logger *log.Logger) error {
-	profileBtn, err := page.Timeout(actionTimeout).Element(".headerProfileName")
-	if err != nil {
-		logoutButton, err := page.Timeout(actionTimeout).Element("#click-admin-header-logout")
-		if err != nil {
-			return fmt.Errorf("botón .headerProfileName no encontrado: %w", err)
-		} else {
-			if err := logoutButton.Click(proto.InputMouseButtonLeft, 1); err != nil {
-				return fmt.Errorf("click en #click-admin-header-logout: %w", err)
-			}
-			return nil
+	// La página tiene un deadline de por vida (pageTimeout) que puede agotarse
+	// justo durante el logout (es el último paso). Se des acota para que la
+	// búsqueda no muera por ese límite.
+	page = page.Context(context.Background())
+
+	// 1) Abrir el menú de usuario probando varios selectores (la UI de Sesame
+	// cambia con frecuencia; .headerProfileName ya no existe).
+	profileSelectors := []string{
+		`.headerProfileName`,
+		`[class*="ProfileName"]`,
+		`[class*="profile"]`,
+		`[class*="avatar"]`,
+		`header button`,
+	}
+	for _, sel := range profileSelectors {
+		el, err := page.Timeout(2 * time.Second).Element(sel)
+		if err != nil || el == nil {
+			continue
+		}
+		if err := el.Click(proto.InputMouseButtonLeft, 1); err == nil {
+			break
 		}
 	}
-	if err := profileBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("click en .headerProfileName: %w", err)
+
+	// 2) Buscar el botón de logout: primero por selectores directos y luego por
+	// texto ("Cerrar sesión" / "Log out"), reintentando hasta el deadline.
+	logoutSelectors := []string{
+		`#click-admin-header-logout`,
+		`[class*="logout"]`,
+		`[data-test*="logout"]`,
+		`[href*="logout"]`,
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, sel := range logoutSelectors {
+			el, err := page.Timeout(1 * time.Second).Element(sel)
+			if err != nil || el == nil {
+				continue
+			}
+			if err := clickElement(page, el); err == nil {
+				logger.Println("Sesión cerrada")
+				return nil
+			}
+		}
+		for _, txt := range []string{"cerrar sesión", "cerrar sesion", "log out"} {
+			el, _, err := waitForClickByText(page, txt, 2*time.Second)
+			if err != nil || el == nil {
+				continue
+			}
+			if err := clickElement(page, el); err == nil {
+				logger.Println("Sesión cerrada")
+				return nil
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	logoutBtn, err := page.Timeout(actionTimeout).Element("#click-admin-header-logout")
+	debugDumpUI(page, logger)
+	return fmt.Errorf("no se encontró el botón de cerrar sesión")
+}
+
+// originOf reduce una URL a su origen (scheme://host[:port]), formato que
+// exige CDP en Browser.grantPermissions (una URL con path no es un origen).
+func originOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return rawURL
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// debugDumpUI vuelca textos visibles y una captura de pantalla para diagnosticar
+// por qué no se encuentra el botón de fichar (overlays, onboarding, shadow DOM,
+// iframes, cambios de texto en la UI de Sesame). Se ejecuta solo cuando la
+// búsqueda del botón ha fallado.
+func debugDumpUI(page *rod.Page, logger *log.Logger) {
+	logger.Println("DEBUG: volcando estado de la página para diagnosticar...")
+	// Contexto propio: la página tiene un deadline de por vida (pageTimeout) que
+	// ya puede estar agotado cuando llegamos aquí.
+	dbgCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	dbgPage := page.Context(dbgCtx)
+	res, err := dbgPage.Eval(`() => {
+		const dedupe = new Set()
+		const texts = []
+		for (const el of document.querySelectorAll('button,[role=button],a,span,div,input,p')) {
+			const raw = (el.innerText || el.textContent || el.value || '')
+			const t = raw.trim().replace(/\s+/g, ' ')
+			if (!t || t.length > 90 || dedupe.has(t)) continue
+			// Sólo hojas o elementos cortos: evita volcar contenedores enormes
+			if (el.children.length > 3) continue
+			if (t.length < 3) continue
+			if (t.toLowerCase().includes('sesame') && t.length > 40) continue
+			dedupe.add(t)
+			texts.push(t)
+			if (texts.length >= 100) break
+		}
+		let shadowHosts = 0
+		for (const el of document.querySelectorAll('*')) {
+			if (el.shadowRoot) shadowHosts++
+		}
+		return {
+			url: location.href,
+			title: document.title,
+			iframes: document.querySelectorAll('iframe').length,
+			shadowHosts: shadowHosts,
+			texts: texts,
+		}
+	}`)
 	if err != nil {
-		return fmt.Errorf("botón #click-admin-header-logout no encontrado: %w", err)
+		logger.Printf("DEBUG: error evaluando JS: %v", err)
+	} else {
+		v := res.Value
+		logger.Printf("DEBUG: url=%s title=%q iframes=%d shadowHosts=%d",
+			v.Get("url").Str(), v.Get("title").Str(), v.Get("iframes").Int(), v.Get("shadowHosts").Int())
+		for _, t := range v.Get("texts").Arr() {
+			logger.Printf("DEBUG texto: %q", t.Str())
+		}
 	}
-	if err := logoutBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("click en #click-admin-header-logout: %w", err)
+	if shot, err := dbgPage.Screenshot(true, nil); err == nil {
+		if werr := os.WriteFile("/tmp/sesame-debug.png", shot, 0o644); werr == nil {
+			logger.Println("DEBUG: captura guardada en /tmp/sesame-debug.png")
+		}
 	}
-
-	logger.Println("Sesión cerrada")
-	return nil
 }
 
 func findFirst(page *rod.Page, selectors []string) (*rod.Element, error) {
@@ -513,14 +622,86 @@ func findFirst(page *rod.Page, selectors []string) (*rod.Element, error) {
 	return nil, fmt.Errorf("ningún selector encontró un elemento")
 }
 
-func waitForElementByText(page *rod.Page, tag, text string) (*rod.Element, error) {
-	deadline := time.Now().Add(pageTimeout)
+// clickElement intenta el click nativo de rod (input real del navegador) y, si
+// el elemento no es clicable (p.ej. pointer-events:none), hace fallback a un
+// click vía JS. El evento JS burbujea hasta el contenedor con el listener.
+func clickElement(page *rod.Page, el *rod.Element) error {
+	err := el.Click(proto.InputMouseButtonLeft, 1)
+	if err == nil {
+		return nil
+	}
+	log.Printf("click nativo falló (%v), probando click vía JS...", err)
+	res, jsErr := el.Eval(`() => { this.click(); return true }`)
+	if jsErr == nil && res != nil {
+		return nil
+	}
+	return fmt.Errorf("click nativo: %v — click vía JS: %w", err, jsErr)
+}
+
+// waitForClickByText localiza el botón de fichaje por su texto visible ("Entrar"
+// o "Salir") y devuelve un elemento sobre el que se puede hacer click.
+//
+// Sesame HR cambia su interfaz con frecuencia: el texto puede vivir en un
+// <button>, en un elemento con [role=button], en la familia de clases
+// hr-button-*, o en un <span> interior con pointer-events:none (caso actual,
+// donde el click simulado de rod sobre el span falla con
+// "element's pointer-events is none"). Por eso se prueban varios selectores y
+// se comprueba que el candidato acepte clicks reales (rect no vacío y
+// pointer-events distintos de none). Si tras varios intentos sólo hay
+// candidatos no clicables, se recurre a el.click() vía JS, que dispara el
+// evento igualmente y burbujea hasta el contenedor con el listener.
+func waitForClickByText(page *rod.Page, text string, timeout time.Duration) (*rod.Element, string, error) {
+	// Ordenados de más a menos probable que acepten el click.
+	selectors := []string{
+		`button`,
+		`[role="button"]`,
+		`[class*="hr-button"]`,
+		`span`,
+	}
+
+	deadline := time.Now().Add(timeout)
+	nonClickable := 0
+	var firstMatch *rod.Element
+
 	for time.Now().Before(deadline) {
-		el, err := page.ElementR(tag, text)
-		if err == nil && el != nil {
-			return el, nil
+		for _, sel := range selectors {
+			els, err := page.Elements(sel)
+			if err != nil {
+				continue
+			}
+			for _, el := range els {
+				txt, err := el.Text()
+				if err != nil {
+					continue
+				}
+				normalized := strings.ToLower(strings.Join(strings.Fields(txt), " "))
+				if !strings.Contains(normalized, strings.ToLower(text)) {
+					continue
+				}
+				if firstMatch == nil {
+					if vis, verr := el.Visible(); verr != nil || vis {
+						firstMatch = el
+					}
+				}
+				clickable, cerr := el.Eval(`() => {
+					const rect = this.getBoundingClientRect()
+					if (rect.width === 0 && rect.height === 0) return false
+					return getComputedStyle(this).pointerEvents !== 'none'
+				}`)
+				if cerr == nil && clickable.Value.Bool() {
+					return el, sel, nil
+				}
+			}
+		}
+		if firstMatch != nil {
+			nonClickable++
+			if nonClickable >= 3 {
+				// Encontrado pero no clicable (p.ej. span con pointer-events:none):
+				// click vía JS, que dispara el evento y burbujea al contenedor.
+				return firstMatch, "js-click", nil
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("timeout esperando <%s> con texto '%s'", tag, text)
+	return nil, "", fmt.Errorf("timeout esperando elemento con texto '%s'", text)
 }
