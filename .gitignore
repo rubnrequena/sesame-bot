@@ -6,4 +6,5 @@ sesame-bot
 sesame-bot.exe
 
 # Go
-go.sum
+# go.sum DEBE versionarse: es el lockfile de verificación de módulos
+# (necesario para builds reproducibles y para el build de Docker)
