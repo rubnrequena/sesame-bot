@@ -359,9 +359,15 @@ func runAction(cfg config, action actionType) (string, error) {
 		return "", fmt.Errorf("esperar carga login: %w", err)
 	}
 	if err := doLogin(page, cfg.email, cfg.password, logger); err != nil {
+		debugDumpUI(page, logger)
 		return "", fmt.Errorf("login: %w", err)
 	}
 	logger.Println("Login exitoso")
+
+	// El deadline global de la página pudo agotarse durante el login; la fase de
+	// fichaje necesita presupuesto propio o el botón de fichar fallará con
+	// "context deadline exceeded".
+	page = renewPage(page)
 
 	holidays := waitHolidays()
 	today := time.Now().Format("2006-01-02")
@@ -426,6 +432,11 @@ func runAction(cfg config, action actionType) (string, error) {
 }
 
 func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
+	// El deadline de la página pudo consumirse en Navigate/WaitLoad. El login
+	// necesita su propio presupuesto o el click muere con
+	// "context deadline exceeded" aunque el botón ya esté en el DOM.
+	page = renewPage(page)
+
 	emailSelectors := []string{
 		`input[type="email"]`,
 		`input[name="email"]`,
@@ -438,6 +449,21 @@ func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 		`input[name="password"]`,
 		`input[id*="password"]`,
 	}
+	// Los ids exactos son la vía principal; las heurísticas por id o submit se
+	// verifican con el texto visible antes de aceptarlas.
+	nextSelectors := []string{`#btn-next-login`}
+	nextHeuristic := []string{
+		`button[id$="next-login"]`,
+		`button[type="submit"]`,
+	}
+	nextTexts := []string{"Siguiente", "Continuar", "Next"}
+
+	loginSelectors := []string{`#btn-login-login`}
+	loginHeuristic := []string{
+		`button[id$="login-login"]`,
+		`button[type="submit"]`,
+	}
+	loginTexts := []string{"Iniciar sesión", "Entrar", "Log in", "Sign in"}
 
 	emailInput, err := findFirst(page, emailSelectors)
 	if err != nil {
@@ -447,13 +473,14 @@ func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 		return fmt.Errorf("escribir email: %w", err)
 	}
 
-	logger.Println("Click en #btn-next-login...")
-	nextBtn, err := page.Timeout(actionTimeout).Element("#btn-next-login")
+	logger.Println("Buscando botón siguiente del login...")
+	nextBtn, via, err := waitForButton(page, nextSelectors, nextHeuristic, nextTexts, actionTimeout)
 	if err != nil {
-		return fmt.Errorf("botón #btn-next-login no encontrado: %w", err)
+		return fmt.Errorf("botón siguiente del login no encontrado: %w", err)
 	}
-	if err := nextBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("click #btn-next-login: %w", err)
+	logger.Printf("Botón siguiente localizado (%s)", via)
+	if err := clickElement(page, nextBtn); err != nil {
+		return fmt.Errorf("click en botón siguiente del login: %w", err)
 	}
 
 	passwordInput, err := findFirst(page, passwordSelectors)
@@ -464,13 +491,14 @@ func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 		return fmt.Errorf("escribir password: %w", err)
 	}
 
-	logger.Println("Click en #btn-login-login...")
-	loginBtn, err := page.Timeout(actionTimeout).Element("#btn-login-login")
+	logger.Println("Buscando botón de login...")
+	loginBtn, via, err := waitForButton(page, loginSelectors, loginHeuristic, loginTexts, actionTimeout)
 	if err != nil {
-		return fmt.Errorf("botón #btn-login-login no encontrado: %w", err)
+		return fmt.Errorf("botón de login no encontrado: %w", err)
 	}
-	if err := loginBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return fmt.Errorf("click #btn-login-login: %w", err)
+	logger.Printf("Botón de login localizado (%s)", via)
+	if err := clickElement(page, loginBtn); err != nil {
+		return fmt.Errorf("click en botón de login: %w", err)
 	}
 
 	logger.Println("Esperando redirección post-login...")
@@ -612,6 +640,142 @@ func debugDumpUI(page *rod.Page, logger *log.Logger) {
 	}
 }
 
+// renewPage devuelve un clon de la página con un presupuesto de tiempo nuevo.
+//
+// La página nace con pageTimeout de vida completa y ese deadline arranca antes
+// de Navigate: si la SPA tarda en cargar, las fases siguientes fallan con
+// "context deadline exceeded" aunque el elemento exista. Se renueva por fase en
+// lugar de acumular un único presupuesto global.
+//
+// Precondición: page debe venir de (*rod.Page).Timeout.
+func renewPage(page *rod.Page) *rod.Page {
+	return page.CancelTimeout().Timeout(pageTimeout)
+}
+
+// isClickable informa si el elemento tiene caja visible y acepta eventos de
+// puntero. Los <span> internos de Sesame suelen tener pointer-events:none y el
+// click nativo de rod falla con "element's pointer-events is none".
+func isClickable(el *rod.Element) bool {
+	res, err := el.Eval(`() => {
+		const rect = this.getBoundingClientRect()
+		if (rect.width === 0 && rect.height === 0) return false
+		const style = getComputedStyle(this)
+		if (style.display === 'none' || style.visibility === 'hidden') return false
+		return style.pointerEvents !== 'none'
+	}`)
+	return err == nil && res.Value.Bool()
+}
+
+// elementMatcher filtra candidatos antes de comprobar si aceptan clicks. nil
+// significa "cualquier elemento".
+type elementMatcher func(*rod.Element) bool
+
+// textMatcher devuelve un matcher que exige que el texto visible del elemento
+// contenga alguno de los textos dados, ignorando mayúsculas y espacios extra.
+func textMatcher(texts ...string) elementMatcher {
+	needles := make([]string, len(texts))
+	for i, t := range texts {
+		needles[i] = strings.ToLower(t)
+	}
+	return func(el *rod.Element) bool {
+		txt, err := el.Text()
+		if err != nil {
+			return false
+		}
+		normalized := strings.ToLower(strings.Join(strings.Fields(txt), " "))
+		for _, needle := range needles {
+			if strings.Contains(normalized, needle) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// jsClickGrace es el tiempo que se sigue buscando un candidato clicable antes de
+// rendirse y devolver un match no clicable para intentar el click vía JS. Sin
+// esta espera, una etiqueta visible antes que el botón real (p.ej. un span con
+// pointer-events:none o el texto de estado del fichaje) provoca un JS click
+// sobre el elemento equivocado.
+const jsClickGrace = 5 * time.Second
+
+// waitForClickable espera a que algún selector apunte a un elemento que cumpla
+// match y acepte clicks reales. Reintenta hasta el deadline porque la SPA monta
+// el formulario de forma asíncrona. Si sólo aparecen candidatos no clicables
+// durante jsClickGrace, devuelve el primero para que clickElement resuelva vía
+// JS: el evento burbujea hasta el contenedor que tiene el listener.
+func waitForClickable(page *rod.Page, selectors []string, timeout time.Duration, match elementMatcher) (*rod.Element, string, error) {
+	deadline := time.Now().Add(timeout)
+	var firstMatch *rod.Element
+	var firstSel string
+	var firstMatchAt time.Time
+
+	for time.Now().Before(deadline) {
+		for _, sel := range selectors {
+			els, err := page.Elements(sel)
+			if err != nil {
+				continue
+			}
+			for _, el := range els {
+				if match != nil && !match(el) {
+					continue
+				}
+				if vis, verr := el.Visible(); verr == nil && !vis {
+					continue
+				}
+				if firstMatch == nil {
+					firstMatch, firstSel = el, sel
+					firstMatchAt = time.Now()
+				}
+				if isClickable(el) {
+					return el, sel, nil
+				}
+			}
+		}
+		// Sólo se rinde tras jsClickGrace (acotado al presupuesto disponible):
+		// el candidato no clicable puede ser una etiqueta que precede al botón.
+		if firstMatch != nil && time.Since(firstMatchAt) >= min(jsClickGrace, timeout) {
+			return firstMatch, firstSel + " (js-click)", nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if firstMatch != nil {
+		return firstMatch, firstSel + " (js-click)", nil
+	}
+	return nil, "", fmt.Errorf("timeout esperando elemento clicable en %v", selectors)
+}
+
+// waitForButton localiza un botón por id exacto, luego por heurísticas de id
+// verificadas con el texto visible y, por último, sólo por texto. Sesame HR rota
+// ids y clases entre despliegues, así que el login no puede depender de un único
+// selector; además las heurísticas exigen texto para no pulsar el botón del paso
+// anterior si la SPA deja los dos formularios montados.
+func waitForButton(page *rod.Page, exact, heuristic, texts []string, timeout time.Duration) (*rod.Element, string, error) {
+	if el, via, err := waitForClickable(page, exact, timeout/3, nil); err == nil {
+		return el, via, nil
+	}
+	if len(heuristic) > 0 {
+		if el, via, err := waitForClickable(page, heuristic, timeout/3, textMatcher(texts...)); err == nil {
+			return el, via + " + texto", nil
+		}
+	}
+
+	// El último tercio se reparte entre los textos candidatos.
+	deadline := time.Now().Add(timeout / 3)
+	for _, text := range texts {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		el, via, err := waitForClickByText(page, text, remaining)
+		if err == nil {
+			return el, fmt.Sprintf("texto %q (%s)", text, via), nil
+		}
+	}
+	all := append(append([]string{}, exact...), heuristic...)
+	return nil, "", fmt.Errorf("botón no localizado (selectores %v, textos %v)", all, texts)
+}
+
 func findFirst(page *rod.Page, selectors []string) (*rod.Element, error) {
 	for _, sel := range selectors {
 		el, err := page.Timeout(actionTimeout).Element(sel)
@@ -652,56 +816,10 @@ func clickElement(page *rod.Page, el *rod.Element) error {
 // evento igualmente y burbujea hasta el contenedor con el listener.
 func waitForClickByText(page *rod.Page, text string, timeout time.Duration) (*rod.Element, string, error) {
 	// Ordenados de más a menos probable que acepten el click.
-	selectors := []string{
+	return waitForClickable(page, []string{
 		`button`,
 		`[role="button"]`,
 		`[class*="hr-button"]`,
 		`span`,
-	}
-
-	deadline := time.Now().Add(timeout)
-	nonClickable := 0
-	var firstMatch *rod.Element
-
-	for time.Now().Before(deadline) {
-		for _, sel := range selectors {
-			els, err := page.Elements(sel)
-			if err != nil {
-				continue
-			}
-			for _, el := range els {
-				txt, err := el.Text()
-				if err != nil {
-					continue
-				}
-				normalized := strings.ToLower(strings.Join(strings.Fields(txt), " "))
-				if !strings.Contains(normalized, strings.ToLower(text)) {
-					continue
-				}
-				if firstMatch == nil {
-					if vis, verr := el.Visible(); verr != nil || vis {
-						firstMatch = el
-					}
-				}
-				clickable, cerr := el.Eval(`() => {
-					const rect = this.getBoundingClientRect()
-					if (rect.width === 0 && rect.height === 0) return false
-					return getComputedStyle(this).pointerEvents !== 'none'
-				}`)
-				if cerr == nil && clickable.Value.Bool() {
-					return el, sel, nil
-				}
-			}
-		}
-		if firstMatch != nil {
-			nonClickable++
-			if nonClickable >= 3 {
-				// Encontrado pero no clicable (p.ej. span con pointer-events:none):
-				// click vía JS, que dispara el evento y burbujea al contenedor.
-				return firstMatch, "js-click", nil
-			}
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return nil, "", fmt.Errorf("timeout esperando elemento con texto '%s'", text)
+	}, timeout, textMatcher(text))
 }
