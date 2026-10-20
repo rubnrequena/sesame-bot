@@ -355,8 +355,12 @@ func runAction(cfg config, action actionType) (string, error) {
 	if err := page.Navigate(loginURL); err != nil {
 		return "", fmt.Errorf("navegar a login: %w", err)
 	}
-	if err := page.WaitLoad(); err != nil {
-		return "", fmt.Errorf("esperar carga login: %w", err)
+	// No se usa WaitLoad: el evento load espera a TODOS los subrecursos, y una
+	// fuente, un script de analítica o un long-poll que nunca responde lo deja
+	// colgado hasta agotar el deadline de la página (30s). Basta con que el
+	// documento sea interactivo; el formulario lo espera doLogin.
+	if err := waitPageReady(page, actionTimeout); err != nil {
+		logger.Printf("aviso: %v — se continúa esperando el formulario de login", err)
 	}
 	if err := doLogin(page, cfg.email, cfg.password, logger); err != nil {
 		debugDumpUI(page, logger)
@@ -640,6 +644,29 @@ func debugDumpUI(page *rod.Page, logger *log.Logger) {
 	}
 }
 
+// waitPageReady espera a que document.readyState sea al menos "interactive", es
+// decir, a que el DOM esté parseado (DOMContentLoaded). Es más rápido y más
+// fiable que WaitLoad, que espera a todos los subrecursos y se cuelga si una
+// fuente, un script de terceros o un long-poll no responden nunca.
+func waitPageReady(page *rod.Page, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	lastState := ""
+	for time.Now().Before(deadline) {
+		res, err := page.Timeout(2 * time.Second).Eval(`() => document.readyState`)
+		if err == nil {
+			lastState = res.Value.Str()
+			if lastState == "interactive" || lastState == "complete" {
+				return nil
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if lastState == "" {
+		lastState = "desconocido"
+	}
+	return fmt.Errorf("readyState=%s tras %v", lastState, timeout)
+}
+
 // renewPage devuelve un clon de la página con un presupuesto de tiempo nuevo.
 //
 // La página nace con pageTimeout de vida completa y ese deadline arranca antes
@@ -776,14 +803,22 @@ func waitForButton(page *rod.Page, exact, heuristic, texts []string, timeout tim
 	return nil, "", fmt.Errorf("botón no localizado (selectores %v, textos %v)", all, texts)
 }
 
+// findFirst prueba los selectores en bucle hasta un deadline común en lugar de
+// gastar actionTimeout en cada uno. El formulario de Sesame monta los campos de
+// forma asíncrona y ni el orden ni el momento de aparición son estables, así
+// que conviene reintentar todos antes de darse por vencido.
 func findFirst(page *rod.Page, selectors []string) (*rod.Element, error) {
-	for _, sel := range selectors {
-		el, err := page.Timeout(actionTimeout).Element(sel)
-		if err == nil && el != nil {
-			return el, nil
+	deadline := time.Now().Add(actionTimeout)
+	for time.Now().Before(deadline) {
+		for _, sel := range selectors {
+			el, err := page.Timeout(500 * time.Millisecond).Element(sel)
+			if err == nil && el != nil {
+				return el, nil
+			}
 		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("ningún selector encontró un elemento")
+	return nil, fmt.Errorf("ningún selector encontró un elemento: %v", selectors)
 }
 
 // clickElement intenta el click nativo de rod (input real del navegador) y, si
