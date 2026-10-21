@@ -52,6 +52,18 @@
         <button type="submit" class="btn">Guardar</button>
       </div>
     </form>
+
+    <hr class="section-divider">
+    <h2>Fichaje manual</h2>
+    <p style="font-size:.825rem;color:#6e6e73;margin:.1rem 0 1rem;line-height:1.6">
+      Ejecuta un fichaje <strong>real</strong> ahora mismo, usando la ubicación configurada para hoy
+      (oficina si hoy es día de oficina, casa si no) y enviando notificación por WhatsApp.
+    </p>
+    <div style="display:flex;gap:.75rem;flex-wrap:wrap">
+      <button type="button" class="btn" id="checkin-in-btn" onclick="doManualCheckin('IN', this)">Fichar entrada ahora</button>
+      <button type="button" class="btn" id="checkin-out-btn" onclick="doManualCheckin('OUT', this)">Fichar salida ahora</button>
+    </div>
+    <div id="manual-checkin-result" style="margin-top:.85rem"></div>
   </div>
 
   <!-- ── Horarios ────────────────────────────────────────── -->
@@ -525,5 +537,69 @@ togglePwHint();
 // ── Auto-switch tab based on flash ────────────────────────────
 {{if or .DayOverrideSuccess .DayOverrideError}}switchTab('days');{{end}}
 {{if or .PwSuccess .PwError .AccountPwSuccess .AccountPwError}}switchTab('passwords');{{end}}
+
+// ── Fichaje manual ────────────────────────────────────────────
+function _escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+
+function renderRunResult(box, data, kind) {
+  var status = (data && data.status) || (data && data.ok ? 'ok' : 'error');
+  var cls = status === 'error' ? 'flash-err' : 'flash-ok';
+  var label = status === 'ok' ? '✔ ' + kind + ' completada'
+            : status === 'skipped' ? '⏭ ' + kind + ' omitida'
+            : '✖ ' + kind + ' fallida';
+  var html = '<div class="' + cls + '" style="flex-direction:column;align-items:flex-start;gap:.3rem">';
+  html += '<div><strong>' + _escapeHtml(label) + '</strong>';
+  if (data && data.duration_ms) {
+    html += ' <span style="opacity:.7">(' + (Math.round(data.duration_ms / 100) / 10) + 's)</span>';
+  }
+  html += '</div>';
+  if (data && data.location) {
+    html += '<div>Ubicación: ' + _escapeHtml(data.location) + '</div>';
+  }
+  var detail = (data && data.error) || (data && data.status === 'error' ? data.message : '');
+  if (detail) {
+    html += '<div>' + _escapeHtml(detail) + '</div>';
+  }
+  if (data && data.logs && data.logs.length) {
+    html += '<details style="margin-top:.2rem"><summary style="cursor:pointer;font-size:.8rem">Ver log (' + data.logs.length + ' líneas)</summary>'
+          + '<pre style="white-space:pre-wrap;font-size:.72rem;max-height:240px;overflow:auto;background:#f5f5f7;padding:.6rem;border-radius:8px;margin:.4rem 0 0">'
+          + _escapeHtml(data.logs.join('\n')) + '</pre></details>';
+  }
+  html += '</div>';
+  box.innerHTML = html;
+}
+
+function doManualCheckin(action, btn) {
+  var label = action === 'IN' ? 'entrada' : 'salida';
+  if (!confirm('¿Fichar ' + label + ' ahora? Se registrará un fichaje real y se enviará una notificación por WhatsApp.')) return;
+
+  var box = document.getElementById('manual-checkin-result');
+  var original = btn.textContent;
+
+  var body = new URLSearchParams();
+  body.set('action', action);
+
+  btn.disabled = true;
+  btn.textContent = 'Fichando…';
+  box.innerHTML = '<span style="font-size:.85rem;color:#6e6e73">Ejecutando… puede tardar 10-30s</span>';
+
+  fetch('/checkin/manual', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body.toString()
+  }).then(function(r) { return r.json(); }).then(function(data) {
+    renderRunResult(box, data, 'fichaje de ' + label);
+    btn.disabled = false;
+    btn.textContent = original;
+  }).catch(function() {
+    box.innerHTML = '<div class="flash-err">Error de red al ejecutar el fichaje.</div>';
+    btn.disabled = false;
+    btn.textContent = original;
+  });
+}
 </script>
 {{end}}

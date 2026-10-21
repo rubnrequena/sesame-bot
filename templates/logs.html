@@ -5,7 +5,7 @@
   <h1>Historial de fichajes</h1>
   {{if .Logs}}
   <table>
-    <thead><tr><th>Fecha/Hora</th><th>Acción</th><th>Estado</th><th>Detalle</th></tr></thead>
+    <thead><tr><th>Fecha/Hora</th><th>Acción</th><th>Estado</th><th>Origen</th><th>Detalle</th></tr></thead>
     <tbody id="log-rows">
     {{range .Logs}}
     <tr>
@@ -15,6 +15,11 @@
         {{if eq .Status "ok"}}<span class="badge badge-ok">OK</span>
         {{else if eq .Status "error"}}<span class="badge badge-err">Error</span>
         {{else}}<span class="badge badge-skip">Omitido</span>{{end}}
+      </td>
+      <td>
+        {{if eq .Source "manual"}}<span class="badge badge-active">Manual</span>
+        {{else if eq .Source "test"}}<span class="badge" style="background:#eaf4ff;color:#0071e3">Test</span>
+        {{else}}<span class="badge badge-skip">Programado</span>{{end}}
       </td>
       <td style="color:#6e6e73;font-size:.825rem">{{.Message}}</td>
     </tr>

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -71,6 +72,9 @@ type config struct {
 	locationOffice location
 	locationHome   location
 	officeDays     map[time.Weekday]bool
+	// logWriter, si no es nil, recibe además una copia de las líneas de log del
+	// run. Lo usa la ejecución bajo demanda para devolver el log al panel web.
+	logWriter io.Writer
 }
 
 type holidayEntry struct {
@@ -130,23 +134,27 @@ func main() {
 }
 
 // runActionBridge adapts the scheduler's call to the concrete runAction function.
-// headless mode is controlled by the HEADLESS env var (default: true).
+// headless mode is controlled by the HEADLESS env var (default: true). dryRun and
+// logWriter come from the caller (scheduled runs use the scheduler's env default).
 func runActionBridge(
 	userID, email, password string,
 	officeDays string,
 	offLat, offLon, homeLat, homeLon float64,
 	action string,
 	_ time.Time,
+	dryRun bool,
+	logWriter io.Writer,
 ) (string, error) {
 	cfg := config{
 		userID:         userID,
 		email:          email,
 		password:       password,
 		headless:       os.Getenv("HEADLESS") != "false",
-		dryRun:         os.Getenv("DRY_RUN") == "true",
+		dryRun:         dryRun,
 		locationOffice: location{lat: offLat, lon: offLon},
 		locationHome:   location{lat: homeLat, lon: homeLon},
 		officeDays:     parseOfficeDays(officeDays),
+		logWriter:      logWriter,
 	}
 	return runAction(cfg, actionType(action))
 }
@@ -303,7 +311,13 @@ func startHolidayCapture(page *rod.Page, logger *log.Logger) func() []holidayEnt
 // ─── Browser automation ───────────────────────────────────────────────────────
 
 func runAction(cfg config, action actionType) (string, error) {
-	logger := log.New(log.Writer(), fmt.Sprintf("[%s] ", cfg.userID), log.LstdFlags)
+	// Las líneas van a la salida estándar y, si hay logWriter, también a él (lo usa
+	// la ejecución bajo demanda para devolver el log al panel web).
+	var logOut io.Writer = log.Writer()
+	if cfg.logWriter != nil {
+		logOut = io.MultiWriter(log.Writer(), cfg.logWriter)
+	}
+	logger := log.New(logOut, fmt.Sprintf("[%s] ", cfg.userID), log.LstdFlags)
 
 	// Determine location label for the log detail field.
 	day := time.Now().Weekday()
@@ -418,7 +432,10 @@ func runAction(cfg config, action actionType) (string, error) {
 	btn, via, err := waitForClickByText(page, buttonText, pageTimeout)
 	if err != nil {
 		debugDumpUI(page, logger)
-		return "", fmt.Errorf("buscar botón %q: %w", buttonText, err)
+		// La causa más habitual de un botón ausente no es la UI: si el usuario no
+		// tiene coordenadas configuradas, la SPA de Sesame no muestra el botón de
+		// fichar (aunque se conceda el permiso GPS).
+		return "", fmt.Errorf("buscar botón %q: %w — si el usuario no tiene coordenadas configuradas, Sesame no muestra el botón de fichar", buttonText, err)
 	}
 	logger.Printf("Botón %q localizado (%s)", buttonText, via)
 	if err := btn.WaitVisible(); err != nil {
@@ -480,12 +497,7 @@ func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 	}
 	loginTexts := []string{"Iniciar sesión", "Entrar", "Log in", "Sign in"}
 
-	emailInput, via, err := findFirst(page, emailSelectors, pageTimeout)
-	if err != nil {
-		return fmt.Errorf("campo email no encontrado: %w", err)
-	}
-	logger.Printf("Campo email localizado (%s)", via)
-	if err := emailInput.Input(email); err != nil {
+	if err := inputWithRetry(page, emailSelectors, email, pageTimeout); err != nil {
 		return fmt.Errorf("escribir email: %w", err)
 	}
 
@@ -499,12 +511,7 @@ func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 		return fmt.Errorf("click en botón siguiente del login: %w", err)
 	}
 
-	passwordInput, via, err := findFirst(page, passwordSelectors, pageTimeout)
-	if err != nil {
-		return fmt.Errorf("campo password no encontrado: %w", err)
-	}
-	logger.Printf("Campo password localizado (%s)", via)
-	if err := passwordInput.Input(password); err != nil {
+	if err := inputWithRetry(page, passwordSelectors, password, pageTimeout); err != nil {
 		return fmt.Errorf("escribir password: %w", err)
 	}
 
@@ -546,7 +553,7 @@ func doLogout(page *rod.Page, logger *log.Logger) error {
 		`header button`,
 	}
 	for _, sel := range profileSelectors {
-		el, err := page.Timeout(2 * time.Second).Element(sel)
+		el, err := searchElement(page, sel, 2*time.Second)
 		if err != nil || el == nil {
 			continue
 		}
@@ -566,7 +573,7 @@ func doLogout(page *rod.Page, logger *log.Logger) error {
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, sel := range logoutSelectors {
-			el, err := page.Timeout(1 * time.Second).Element(sel)
+			el, err := searchElement(page, sel, time.Second)
 			if err != nil || el == nil {
 				continue
 			}
@@ -863,6 +870,50 @@ func waitForButton(page *rod.Page, exact, heuristic, texts []string, timeout tim
 	return nil, "", fmt.Errorf("botón no localizado (selectores %v, textos %v)", all, texts)
 }
 
+// searchElement busca un elemento con un deadline corto de sondeo y lo devuelve
+// ligado al contexto de la página.
+//
+// rod propaga el contexto del clon con timeout al elemento encontrado
+// (ElementFromObject usa p.ctx), así que un elemento localizado con
+// Timeout(1s) queda atado a ese deadline: cualquier uso posterior (Input,
+// Click) muere con "context deadline exceeded" en cuanto el renderer tarda.
+// CancelTimeout devuelve el elemento al contexto de la página.
+func searchElement(page *rod.Page, selector string, timeout time.Duration) (*rod.Element, error) {
+	el, err := page.Timeout(timeout).Element(selector)
+	if err != nil {
+		return nil, err
+	}
+	return el.CancelTimeout(), nil
+}
+
+// inputWithRetry escribe un valor en el primer campo que encaje con los
+// selectores, reintentando hasta el deadline.
+//
+// La SPA de Sesame re-renderiza el formulario entre pasos: el elemento
+// encontrado puede quedar desanclado del DOM justo antes de escribir, y el
+// error no es recuperable con ese elemento. Se vuelve a buscar y a escribir.
+func inputWithRetry(page *rod.Page, selectors []string, value string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		el, _, err := findFirst(page, selectors, 2*time.Second)
+		if err == nil {
+			if err := el.Input(value); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+		} else {
+			lastErr = err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timeout esperando un campo escribible")
+	}
+	return lastErr
+}
+
 // findFirst prueba los selectores en bucle hasta un deadline común en lugar de
 // gastar actionTimeout en cada uno. El formulario de Sesame monta los campos de
 // forma asíncrona y ni el orden ni el momento de aparición son estables, así
@@ -871,7 +922,7 @@ func findFirst(page *rod.Page, selectors []string, timeout time.Duration) (*rod.
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		for _, sel := range selectors {
-			el, err := page.Timeout(time.Second).Element(sel)
+			el, err := searchElement(page, sel, time.Second)
 			if err == nil && el != nil {
 				return el, sel, nil
 			}

@@ -219,11 +219,12 @@ func handleLogout(pool *pgxpool.Pool) http.HandlerFunc {
 
 func handleDashboard(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFunc {
 	type data struct {
-		User            *models.User
-		Config          *models.UserConfig
-		HasPassword     bool
+		User             *models.User
+		Config           *models.UserConfig
+		HasPassword      bool
 		PasswordInMemory bool
-		Logs            []models.CheckinLog
+		Logs             []models.CheckinLog
+		Users            []models.User
 	}
 	tmpl := parseTemplates("dashboard.html")
 
@@ -239,6 +240,12 @@ func handleDashboard(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.Handle
 
 		logs, _ := appdb.GetUserLogs(r.Context(), pool, user.ID, 5, 0)
 
+		// El selector de usuario del dry-run sólo se ofrece al admin.
+		var users []models.User
+		if user.IsAdmin {
+			users, _ = appdb.ListUsers(r.Context(), pool)
+		}
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.Execute(w, data{
 			User:             user,
@@ -246,6 +253,7 @@ func handleDashboard(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.Handle
 			HasPassword:      hasPassword,
 			PasswordInMemory: inMemory,
 			Logs:             logs,
+			Users:            users,
 		}); err != nil {
 			log.Printf("dashboard render: %v", err)
 		}
@@ -668,6 +676,11 @@ func handleLogs(pool *pgxpool.Pool) http.HandlerFunc {
     {{else if eq .Status "error"}}<span class="badge badge-err">Error</span>
     {{else}}<span class="badge badge-skip">Omitido</span>{{end}}
   </td>
+  <td>
+    {{if eq .Source "manual"}}<span class="badge badge-active">Manual</span>
+    {{else if eq .Source "test"}}<span class="badge" style="background:#eaf4ff;color:#0071e3">Test</span>
+    {{else}}<span class="badge badge-skip">Programado</span>{{end}}
+  </td>
   <td style="color:#6e6e73;font-size:.825rem">{{.Message}}</td>
 </tr>
 {{end}}`))
@@ -938,6 +951,130 @@ func handleAdminSendWhatsapp(pool *pgxpool.Pool, wsClient *ws.Whatsapp) http.Han
 	}
 }
 
+// ─── Ejecución manual y dry-run ───────────────────────────────────────────────
+
+// manualRunTimeout es el presupuesto de una ejecución bajo demanda. Es propio y no
+// el de la request, para que el cliente pueda desconectarse sin cortar el navegador.
+const manualRunTimeout = 120 * time.Second
+
+// runResponse es la respuesta JSON común de /test-run y /checkin/manual.
+type runResponse struct {
+	OK         bool     `json:"ok"`
+	Action     string   `json:"action"`
+	Location   string   `json:"location"`
+	Status     string   `json:"status"`
+	Message    string   `json:"message"`
+	Error      string   `json:"error,omitempty"`
+	DurationMS int64    `json:"duration_ms"`
+	Logs       []string `json:"logs"`
+}
+
+func writeRunJSON(w http.ResponseWriter, code int, resp runResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// runResponseFromResult traduce el resultado del scheduler a la respuesta JSON.
+func runResponseFromResult(res scheduler.RunResult) runResponse {
+	resp := runResponse{
+		OK:         res.Status == "ok",
+		Action:     res.Action,
+		Location:   res.Location,
+		Status:     res.Status,
+		Message:    res.Message,
+		DurationMS: res.Duration.Milliseconds(),
+		Logs:       res.Logs,
+	}
+	if res.Status == "error" {
+		resp.Error = res.Message
+	}
+	return resp
+}
+
+// handleTestRun ejecuta el flujo en modo simulación (dry-run forzado) sin marcar
+// ningún fichaje real. Sólo un admin puede probar a otro usuario.
+func handleTestRun(sched *scheduler.Scheduler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		user := currentUser(r)
+		_ = r.ParseForm()
+
+		targetID := strings.TrimSpace(r.FormValue("user_id"))
+		if targetID == "" {
+			targetID = user.ID
+		}
+		if targetID != user.ID && !user.IsAdmin {
+			writeRunJSON(w, http.StatusForbidden, runResponse{Error: "Sólo un administrador puede probar otro usuario"})
+			return
+		}
+
+		action := strings.ToUpper(strings.TrimSpace(r.FormValue("action")))
+		if action == "" {
+			action = "IN"
+		}
+		if action != "IN" && action != "OUT" {
+			writeRunJSON(w, http.StatusBadRequest, runResponse{Error: "Acción inválida: usa IN o OUT"})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), manualRunTimeout)
+		defer cancel()
+
+		// DryRun se fuerza aquí: este endpoint nunca marca un fichaje real.
+		res, err := sched.RunForUser(ctx, targetID, scheduler.RunOptions{
+			Action: action,
+			DryRun: true,
+			Source: "test",
+			Notify: false,
+		})
+		if err != nil {
+			writeRunJSON(w, http.StatusOK, runResponse{Action: action, Error: err.Error()})
+			return
+		}
+		writeRunJSON(w, http.StatusOK, runResponseFromResult(res))
+	}
+}
+
+// handleManualCheckin marca un fichaje real del usuario autenticado, con la
+// ubicación configurada para hoy, y notifica por WhatsApp.
+func handleManualCheckin(sched *scheduler.Scheduler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		user := currentUser(r)
+		_ = r.ParseForm()
+
+		action := strings.ToUpper(strings.TrimSpace(r.FormValue("action")))
+		if action != "IN" && action != "OUT" {
+			writeRunJSON(w, http.StatusBadRequest, runResponse{Error: "Acción inválida: usa IN o OUT"})
+			return
+		}
+		force := r.FormValue("force") == "1"
+
+		ctx, cancel := context.WithTimeout(context.Background(), manualRunTimeout)
+		defer cancel()
+
+		res, err := sched.RunForUser(ctx, user.ID, scheduler.RunOptions{
+			Action: action,
+			DryRun: false,
+			Source: "manual",
+			Notify: true,
+			Force:  force,
+		})
+		if err != nil {
+			writeRunJSON(w, http.StatusOK, runResponse{Action: action, Error: err.Error()})
+			return
+		}
+		writeRunJSON(w, http.StatusOK, runResponseFromResult(res))
+	}
+}
+
 // ─── Server ───────────────────────────────────────────────────────────────────
 
 func generateRandomPassword(length int) (string, error) {
@@ -1015,6 +1152,9 @@ func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler, wsClient *ws
 	mux.HandleFunc("/config/account-password", requireAuth(pool, handleConfigAccountPassword(pool)))
 	mux.HandleFunc("/config/day-overrides", requireAuth(pool, handleConfigDayOverrides(pool, sched)))
 	mux.HandleFunc("/logs", requireAuth(pool, handleLogs(pool)))
+
+	mux.HandleFunc("/test-run", requireAuth(pool, handleTestRun(sched)))
+	mux.HandleFunc("/checkin/manual", requireAuth(pool, handleManualCheckin(sched)))
 
 	mux.HandleFunc("/admin", requireAdmin(pool, handleAdmin(pool)))
 	mux.HandleFunc("/admin/users/", requireAdmin(pool, func(w http.ResponseWriter, r *http.Request) {

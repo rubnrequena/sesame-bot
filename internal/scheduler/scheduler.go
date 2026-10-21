@@ -1,11 +1,14 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -33,6 +36,13 @@ type Scheduler struct {
 	runAction    RunActionFn
 	wsClient     *ws.Whatsapp
 
+	// dryRun se aplica a las ejecuciones programadas; las manuales y el dry-run
+	// de diagnóstico lo fijan por llamada en RunOptions.
+	dryRun bool
+
+	// runLocks serializa las ejecuciones bajo demanda: un solo run por usuario.
+	runLocks sync.Map // map[userID string] -> *sync.Mutex
+
 	// Estado de jitter compartido entre el loop Run y las notificaciones
 	// disparadas desde la web, para que ambas vean los mismos offsets ya
 	// sorteados del día. Protegido por schedMu.
@@ -42,13 +52,16 @@ type Scheduler struct {
 }
 
 // RunActionFn is the type of the function provided by main to do the actual browser automation.
-// It returns a location label ("Oficina" or "Casa") and an error.
+// It returns a location label ("Oficina" or "Casa") and an error. dryRun forces the
+// simulation path and logWriter, when non-nil, receives a copy of the run log.
 type RunActionFn func(
 	userID, email, password string,
 	officeDays string,
 	offLat, offLon, homeLat, homeLon float64,
 	action string,
 	scheduledAt time.Time,
+	dryRun bool,
+	logWriter io.Writer,
 ) (string, error)
 
 func New(pool *pgxpool.Pool, encKey []byte, fn RunActionFn, wsClient *ws.Whatsapp) *Scheduler {
@@ -57,6 +70,7 @@ func New(pool *pgxpool.Pool, encKey []byte, fn RunActionFn, wsClient *ws.Whatsap
 		encKey:        encKey,
 		runAction:     fn,
 		wsClient:      wsClient,
+		dryRun:        os.Getenv("DRY_RUN") == "true",
 		jitterOffsets: make(map[string]int),
 		jitterBags:    make(map[string]*jitterDay),
 	}
@@ -145,7 +159,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 							c.OfficeDays,
 							c.LocationOfficeLat, c.LocationOfficeLon,
 							c.LocationHomeLat, c.LocationHomeLon,
-							action, scheduledAt,
+							action, scheduledAt, s.dryRun, nil,
 						)
 						status, msg := "ok", locLabel
 						if err != nil {
@@ -160,7 +174,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 							log.Printf("Scheduler [%s]: %s completado en %s", uid, action, locLabel)
 						}
 						dbCtx := context.Background()
-						if logErr := db.InsertCheckinLog(dbCtx, s.pool, uid, action, status, msg, scheduledAt); logErr != nil {
+						if logErr := db.InsertCheckinLog(dbCtx, s.pool, uid, action, status, msg, scheduledAt, "scheduled"); logErr != nil {
 							log.Printf("Scheduler: error guardando log: %v", logErr)
 						}
 						s.sendWhatsappNotification(uid, action, status, locLabel, msg, whatsappNumber)
@@ -188,6 +202,127 @@ func (s *Scheduler) resolvePassword(uw models.UserWithConfig) string {
 		return pw
 	}
 	return ""
+}
+
+// RunOptions describe una ejecución de fichaje bajo demanda (fichaje manual o
+// dry-run de diagnóstico). La vía programada no las usa.
+type RunOptions struct {
+	Action string // "IN" | "OUT"
+	DryRun bool   // simulación: no pulsa el botón de fichaje
+	Source string // "manual" | "test"
+	Notify bool   // enviar notificación por WhatsApp al terminar
+	Force  bool   // permitir repetir la misma acción el mismo día
+}
+
+// RunResult resume el resultado de una ejecución bajo demanda.
+type RunResult struct {
+	Action   string
+	Location string
+	Status   string
+	Message  string
+	Duration time.Duration
+	Logs     []string
+}
+
+// RunForUser ejecuta el flujo completo de fichaje de un usuario bajo demanda.
+// Es el punto de entrada común del fichaje manual y del dry-run de diagnóstico.
+// Sólo admite una ejecución simultánea por usuario.
+func (s *Scheduler) RunForUser(ctx context.Context, userID string, opts RunOptions) (RunResult, error) {
+	unlock, err := s.lockUser(userID)
+	if err != nil {
+		return RunResult{}, err
+	}
+	defer unlock()
+
+	uw, err := db.LoadUserWithConfig(ctx, s.pool, userID)
+	if err != nil {
+		return RunResult{}, fmt.Errorf("cargando usuario: %w", err)
+	}
+
+	password := s.resolvePassword(uw)
+	if password == "" {
+		return RunResult{}, fmt.Errorf("el usuario no tiene contraseña de Sesame configurada")
+	}
+
+	// La guardia de duplicados sólo aplica a fichajes reales: una simulación no
+	// puede duplicar un fichaje y debe poder ejecutarse aunque hoy ya haya fichado.
+	if !opts.Force && !opts.DryRun {
+		done, err := db.HasCheckinToday(ctx, s.pool, userID, opts.Action)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("comprobando los fichajes del día: %w", err)
+		}
+		if done {
+			label := "entrada"
+			if opts.Action == "OUT" {
+				label = "salida"
+			}
+			return RunResult{}, fmt.Errorf("ya hay una %s registrada hoy", label)
+		}
+	}
+
+	var buf bytes.Buffer
+	c := uw.Config
+	start := time.Now()
+	locLabel, runErr := s.runAction(
+		uw.User.ID, c.SesameEmail, password,
+		c.OfficeDays,
+		c.LocationOfficeLat, c.LocationOfficeLon,
+		c.LocationHomeLat, c.LocationHomeLon,
+		opts.Action, start, opts.DryRun, &buf,
+	)
+	duration := time.Since(start)
+
+	status, msg := "ok", locLabel
+	if runErr != nil {
+		if errors.Is(runErr, ErrSkipped) {
+			status, msg = "skipped", runErr.Error()
+		} else {
+			status, msg = "error", runErr.Error()
+		}
+	}
+
+	// El dry-run se registra con action='TEST' para no confundirse con un fichaje
+	// real de IN/OUT en el historial.
+	logAction := opts.Action
+	if opts.Source == "test" {
+		logAction = "TEST"
+	}
+	if logErr := db.InsertCheckinLog(ctx, s.pool, userID, logAction, status, msg, start, opts.Source); logErr != nil {
+		log.Printf("Scheduler [%s]: error guardando log: %v", userID, logErr)
+	}
+
+	if opts.Notify {
+		s.sendWhatsappNotification(userID, opts.Action, status, locLabel, msg, c.WhatsappNumber)
+	}
+
+	return RunResult{
+		Action:   opts.Action,
+		Location: locLabel,
+		Status:   status,
+		Message:  msg,
+		Duration: duration,
+		Logs:     splitLines(buf.String()),
+	}, nil
+}
+
+// lockUser reserva la ejecución de un usuario. Devuelve un error si ya hay un run
+// en curso para ese usuario.
+func (s *Scheduler) lockUser(userID string) (func(), error) {
+	val, _ := s.runLocks.LoadOrStore(userID, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	if !mu.TryLock() {
+		return nil, fmt.Errorf("ya hay una acción en curso para este usuario")
+	}
+	return mu.Unlock, nil
+}
+
+// splitLines parte el log capturado en líneas, descartando el salto final.
+func splitLines(raw string) []string {
+	raw = strings.TrimRight(raw, "\n")
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, "\n")
 }
 
 type scheduledEntry struct {

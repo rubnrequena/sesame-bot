@@ -40,9 +40,10 @@ type DayOverride struct {
 type CheckinLog struct {
 	ID          string
 	UserID      string
-	Action      string // "IN" or "OUT"
+	Action      string // "IN", "OUT" o "TEST" (dry-run)
 	Status      string // "ok", "error", "skipped"
 	Message     string
+	Source      string // "scheduled", "manual" o "test"
 	ScheduledAt time.Time
 	ExecutedAt  time.Time
 }

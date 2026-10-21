@@ -87,6 +87,25 @@ Al guardar, los cambios se aplican **inmediatamente** al scheduler en memoria y 
 > docker run -v $(pwd)/.env:/app/.env --env-file .env ...
 > ```
 
+### Fichaje manual y dry-run de diagnóstico
+
+Además del fichaje programado, el panel web permite disparar el flujo a demanda:
+
+| Acción | Dónde | Endpoint | Efecto |
+| :--- | :--- | :--- | :--- |
+| Probar login (simulación) | Dashboard | `POST /test-run` | Ejecuta el flujo completo en **dry-run forzado**: comprueba login, navegación y localización del botón, pero **no marca ningún fichaje** ni envía WhatsApp. |
+| Fichar entrada/salida ahora | Configuración | `POST /checkin/manual` | Ejecuta el flujo **real**, marca el fichaje con la ubicación configurada para hoy y **notifica por WhatsApp**. |
+
+- `POST /test-run` acepta `user_id` (opcional) y `action` (`IN`/`OUT`, por defecto `IN`).
+  Sin `user_id` prueba al usuario autenticado; probar a **otro** usuario requiere ser
+  administrador (403 en caso contrario). Registra el intento con `action='TEST'` y
+  `source='test'`.
+- `POST /checkin/manual` acepta `action` (`IN`/`OUT`) y `force=1` (opcional). Siempre
+  actúa sobre el usuario autenticado y se registra con `source='manual'`. Un segundo
+  fichaje de la misma acción el mismo día se rechaza salvo que se envíe `force=1`.
+- Ambos responden JSON con `{ok, action, location, status, message, error, duration_ms, logs[]}`.
+- El historial muestra el **origen** de cada ejecución: Programado, Manual o Test.
+
 ## 🐳 Docker
 
 Las releases se versionan con SemVer (fuente de verdad: archivo `VERSION`).
