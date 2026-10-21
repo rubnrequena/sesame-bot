@@ -28,6 +28,12 @@ const (
 
 	pageTimeout   = 30 * time.Second
 	actionTimeout = 10 * time.Second
+
+	// loginTimeout es el presupuesto de la fase de login completa. Es mayor que
+	// pageTimeout porque un arranque en frío dentro de Docker puede tardar
+	// decenas de segundos en servir la SPA; con 30s el bot se rendía justo
+	// cuando la página ya estaba a punto de responder.
+	loginTimeout = 90 * time.Second
 )
 
 type actionType string
@@ -309,6 +315,10 @@ func runAction(cfg config, action actionType) (string, error) {
 	u := launcher.New().
 		Headless(cfg.headless).
 		Set("disable-blink-features", "AutomationControlled").
+		// Sin esto Chromium usa /dev/shm, que en Docker son 64MB por defecto: el
+		// renderer se queda sin memoria compartida y la página deja de responder
+		// durante decenas de segundos (readyState y querySelector cuelgan).
+		Set("disable-dev-shm-usage").
 		Set("no-sandbox", "").
 		MustLaunch()
 
@@ -359,7 +369,7 @@ func runAction(cfg config, action actionType) (string, error) {
 	// fuente, un script de analítica o un long-poll que nunca responde lo deja
 	// colgado hasta agotar el deadline de la página (30s). Basta con que el
 	// documento sea interactivo; el formulario lo espera doLogin.
-	if err := waitPageReady(page, actionTimeout); err != nil {
+	if err := waitPageReady(page, pageTimeout); err != nil {
 		logger.Printf("aviso: %v — se continúa esperando el formulario de login", err)
 	}
 	if err := doLogin(page, cfg.email, cfg.password, logger); err != nil {
@@ -367,11 +377,6 @@ func runAction(cfg config, action actionType) (string, error) {
 		return "", fmt.Errorf("login: %w", err)
 	}
 	logger.Println("Login exitoso")
-
-	// El deadline global de la página pudo agotarse durante el login; la fase de
-	// fichaje necesita presupuesto propio o el botón de fichar fallará con
-	// "context deadline exceeded".
-	page = renewPage(page)
 
 	holidays := waitHolidays()
 	today := time.Now().Format("2006-01-02")
@@ -403,6 +408,11 @@ func runAction(cfg config, action actionType) (string, error) {
 	} else {
 		buttonText = "Salir"
 	}
+
+	// El deadline global de la página pudo agotarse durante el login y la espera
+	// de holidays; la búsqueda del botón necesita presupuesto propio o fallará
+	// con "context deadline exceeded" aunque el botón ya esté en el DOM.
+	page = renewPage(page, pageTimeout)
 
 	logger.Printf("Buscando botón %q...", buttonText)
 	btn, via, err := waitForClickByText(page, buttonText, pageTimeout)
@@ -436,10 +446,11 @@ func runAction(cfg config, action actionType) (string, error) {
 }
 
 func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
-	// El deadline de la página pudo consumirse en Navigate/WaitLoad. El login
-	// necesita su propio presupuesto o el click muere con
-	// "context deadline exceeded" aunque el botón ya esté en el DOM.
-	page = renewPage(page)
+	// El deadline de la página pudo consumirse durante Navigate/waitPageReady. El
+	// login necesita un presupuesto propio y amplio: en Docker el arranque en
+	// frío de la SPA puede tardar decenas de segundos y con 30s se rendía justo
+	// antes de que la página respondiera.
+	page = renewPage(page, loginTimeout)
 
 	emailSelectors := []string{
 		`input[type="email"]`,
@@ -469,10 +480,11 @@ func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 	}
 	loginTexts := []string{"Iniciar sesión", "Entrar", "Log in", "Sign in"}
 
-	emailInput, err := findFirst(page, emailSelectors)
+	emailInput, via, err := findFirst(page, emailSelectors, pageTimeout)
 	if err != nil {
 		return fmt.Errorf("campo email no encontrado: %w", err)
 	}
+	logger.Printf("Campo email localizado (%s)", via)
 	if err := emailInput.Input(email); err != nil {
 		return fmt.Errorf("escribir email: %w", err)
 	}
@@ -487,10 +499,11 @@ func doLogin(page *rod.Page, email, password string, logger *log.Logger) error {
 		return fmt.Errorf("click en botón siguiente del login: %w", err)
 	}
 
-	passwordInput, err := findFirst(page, passwordSelectors)
+	passwordInput, via, err := findFirst(page, passwordSelectors, pageTimeout)
 	if err != nil {
 		return fmt.Errorf("campo password no encontrado: %w", err)
 	}
+	logger.Printf("Campo password localizado (%s)", via)
 	if err := passwordInput.Input(password); err != nil {
 		return fmt.Errorf("escribir password: %w", err)
 	}
@@ -619,11 +632,33 @@ func debugDumpUI(page *rod.Page, logger *log.Logger) {
 		for (const el of document.querySelectorAll('*')) {
 			if (el.shadowRoot) shadowHosts++
 		}
+		// Los inputs no aparecen en el volcado de textos (no tienen texto), y son
+		// justo lo que busca el login: se listan con sus atributos reales.
+		const inputs = []
+		for (const el of document.querySelectorAll('input')) {
+			const r = el.getBoundingClientRect()
+			inputs.push({
+				type: el.type || '',
+				name: el.name || '',
+				id: el.id || '',
+				placeholder: el.placeholder || '',
+				visible: !!(r.width && r.height),
+			})
+			if (inputs.length >= 20) break
+		}
+		const iframeSrcs = []
+		for (const f of document.querySelectorAll('iframe')) {
+			iframeSrcs.push(f.src || '')
+			if (iframeSrcs.length >= 10) break
+		}
 		return {
 			url: location.href,
 			title: document.title,
-			iframes: document.querySelectorAll('iframe').length,
+			readyState: document.readyState,
+			iframes: iframeSrcs.length,
+			iframeSrcs: iframeSrcs,
 			shadowHosts: shadowHosts,
+			inputs: inputs,
 			texts: texts,
 		}
 	}`)
@@ -631,13 +666,30 @@ func debugDumpUI(page *rod.Page, logger *log.Logger) {
 		logger.Printf("DEBUG: error evaluando JS: %v", err)
 	} else {
 		v := res.Value
-		logger.Printf("DEBUG: url=%s title=%q iframes=%d shadowHosts=%d",
-			v.Get("url").Str(), v.Get("title").Str(), v.Get("iframes").Int(), v.Get("shadowHosts").Int())
+		logger.Printf("DEBUG: url=%s title=%q readyState=%s iframes=%d shadowHosts=%d",
+			v.Get("url").Str(), v.Get("title").Str(), v.Get("readyState").Str(),
+			v.Get("iframes").Int(), v.Get("shadowHosts").Int())
+		for _, src := range v.Get("iframeSrcs").Arr() {
+			logger.Printf("DEBUG iframe src: %q", src.Str())
+		}
+		inputs := v.Get("inputs").Arr()
+		if len(inputs) == 0 {
+			logger.Println("DEBUG: no hay ningún <input> en el documento")
+		}
+		for _, in := range inputs {
+			logger.Printf("DEBUG input: type=%q name=%q id=%q placeholder=%q visible=%t",
+				in.Get("type").Str(), in.Get("name").Str(), in.Get("id").Str(),
+				in.Get("placeholder").Str(), in.Get("visible").Bool())
+		}
 		for _, t := range v.Get("texts").Arr() {
 			logger.Printf("DEBUG texto: %q", t.Str())
 		}
 	}
-	if shot, err := dbgPage.Screenshot(true, nil); err == nil {
+	// La captura lleva su propio contexto: el Eval anterior puede haber consumido
+	// casi todo el presupuesto de diagnóstico si el renderer estaba bloqueado.
+	shotCtx, shotCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shotCancel()
+	if shot, err := page.Context(shotCtx).Screenshot(true, nil); err == nil {
 		if werr := os.WriteFile("/tmp/sesame-debug.png", shot, 0o644); werr == nil {
 			logger.Println("DEBUG: captura guardada en /tmp/sesame-debug.png")
 		}
@@ -648,23 +700,31 @@ func debugDumpUI(page *rod.Page, logger *log.Logger) {
 // decir, a que el DOM esté parseado (DOMContentLoaded). Es más rápido y más
 // fiable que WaitLoad, que espera a todos los subrecursos y se cuelga si una
 // fuente, un script de terceros o un long-poll no responden nunca.
+//
+// El presupuesto debe cubrir un arranque en frío: si el renderer está ocupado,
+// cada Eval se queda esperando y un timeout corto sólo produce diagnósticos.
 func waitPageReady(page *rod.Page, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	lastState := ""
+	lastErr := ""
+	attempts := 0
 	for time.Now().Before(deadline) {
-		res, err := page.Timeout(2 * time.Second).Eval(`() => document.readyState`)
+		attempts++
+		res, err := page.Timeout(5 * time.Second).Eval(`() => document.readyState`)
 		if err == nil {
 			lastState = res.Value.Str()
 			if lastState == "interactive" || lastState == "complete" {
 				return nil
 			}
+		} else {
+			lastErr = err.Error()
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
 	if lastState == "" {
 		lastState = "desconocido"
 	}
-	return fmt.Errorf("readyState=%s tras %v", lastState, timeout)
+	return fmt.Errorf("readyState=%s tras %v (%d intentos, último error: %s)", lastState, timeout, attempts, lastErr)
 }
 
 // renewPage devuelve un clon de la página con un presupuesto de tiempo nuevo.
@@ -675,8 +735,8 @@ func waitPageReady(page *rod.Page, timeout time.Duration) error {
 // lugar de acumular un único presupuesto global.
 //
 // Precondición: page debe venir de (*rod.Page).Timeout.
-func renewPage(page *rod.Page) *rod.Page {
-	return page.CancelTimeout().Timeout(pageTimeout)
+func renewPage(page *rod.Page, d time.Duration) *rod.Page {
+	return page.CancelTimeout().Timeout(d)
 }
 
 // isClickable informa si el elemento tiene caja visible y acepta eventos de
@@ -807,18 +867,18 @@ func waitForButton(page *rod.Page, exact, heuristic, texts []string, timeout tim
 // gastar actionTimeout en cada uno. El formulario de Sesame monta los campos de
 // forma asíncrona y ni el orden ni el momento de aparición son estables, así
 // que conviene reintentar todos antes de darse por vencido.
-func findFirst(page *rod.Page, selectors []string) (*rod.Element, error) {
-	deadline := time.Now().Add(actionTimeout)
+func findFirst(page *rod.Page, selectors []string, timeout time.Duration) (*rod.Element, string, error) {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		for _, sel := range selectors {
-			el, err := page.Timeout(500 * time.Millisecond).Element(sel)
+			el, err := page.Timeout(time.Second).Element(sel)
 			if err == nil && el != nil {
-				return el, nil
+				return el, sel, nil
 			}
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return nil, fmt.Errorf("ningún selector encontró un elemento: %v", selectors)
+	return nil, "", fmt.Errorf("ningún selector encontró un elemento en %v: %v", timeout, selectors)
 }
 
 // clickElement intenta el click nativo de rod (input real del navegador) y, si
