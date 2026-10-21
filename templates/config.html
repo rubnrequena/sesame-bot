@@ -564,6 +564,18 @@ function renderRunResult(box, data, kind) {
   if (detail) {
     html += '<div>' + _escapeHtml(detail) + '</div>';
   }
+  // Aviso no bloqueante: el fichaje se registró aunque un paso posterior (el
+  // cierre de sesión) haya fallado. Se usa el mensaje del propio servidor.
+  var message = (data && data.message) || '';
+  var warning = (data && data.warning) || '';
+  if (!warning && status === 'ok' && message.indexOf('cierre de sesión') !== -1) {
+    warning = message;
+  }
+  if (warning) {
+    html += '<div style="color:#8a6d00">⚠ ' + _escapeHtml(warning) + '</div>';
+  }
+  // El log se muestra también cuando el estado es error: es la única pista de
+  // qué paso falló.
   if (data && data.logs && data.logs.length) {
     html += '<details style="margin-top:.2rem"><summary style="cursor:pointer;font-size:.8rem">Ver log (' + data.logs.length + ' líneas)</summary>'
           + '<pre style="white-space:pre-wrap;font-size:.72rem;max-height:240px;overflow:auto;background:#f5f5f7;padding:.6rem;border-radius:8px;margin:.4rem 0 0">'
@@ -571,6 +583,43 @@ function renderRunResult(box, data, kind) {
   }
   html += '</div>';
   box.innerHTML = html;
+}
+
+// postRunRequest lanza la petición y devuelve siempre un objeto con el
+// resultado, aunque el cuerpo no sea JSON válido (panic del servidor, página de
+// error del proxy, cuerpo vacío). Sólo rechaza si el fetch falla de verdad.
+function postRunRequest(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body.toString()
+  }).then(function(r) {
+    return r.text().then(function(text) {
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        return {
+          status: 'error',
+          error: 'Respuesta inesperada del servidor (HTTP ' + r.status + '): '
+                 + String(text || '(cuerpo vacío)').slice(0, 500)
+        };
+      }
+    });
+  });
+}
+
+// networkErrorMessage explica que el fallo de fetch no descarta el fichaje: el
+// servidor pudo caerse después de marcarlo.
+function networkErrorMessage(dryRun) {
+  var serverHint = 'el servidor pudo caerse (reinicio del contenedor, falta de memoria)';
+  var hint = dryRun
+    ? 'La simulación no marca ningún fichaje, pero ' + serverHint + ' mientras la ejecutaba.'
+    : 'El fichaje puede haberse registrado igualmente: ' + serverHint + ' después de marcarlo. '
+      + 'Compruébalo en el <a href="/logs">historial de logs</a> antes de repetirlo.';
+  return '<div class="flash-err" style="flex-direction:column;align-items:flex-start;gap:.3rem">'
+    + '<div><strong>✖ No se pudo conectar con el servidor</strong></div>'
+    + '<div>' + hint + '</div>'
+    + '</div>';
 }
 
 function doManualCheckin(action, btn) {
@@ -587,16 +636,11 @@ function doManualCheckin(action, btn) {
   btn.textContent = 'Fichando…';
   box.innerHTML = '<span style="font-size:.85rem;color:#6e6e73">Ejecutando… puede tardar 10-30s</span>';
 
-  fetch('/checkin/manual', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: body.toString()
-  }).then(function(r) { return r.json(); }).then(function(data) {
+  postRunRequest('/checkin/manual', body).then(function(data) {
     renderRunResult(box, data, 'fichaje de ' + label);
-    btn.disabled = false;
-    btn.textContent = original;
   }).catch(function() {
-    box.innerHTML = '<div class="flash-err">Error de red al ejecutar el fichaje.</div>';
+    box.innerHTML = networkErrorMessage(false);
+  }).then(function() {
     btn.disabled = false;
     btn.textContent = original;
   });

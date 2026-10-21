@@ -24,6 +24,15 @@ import (
 // ErrSkipped signals that a check-in was intentionally skipped (e.g. public holiday).
 var ErrSkipped = errors.New("skipped")
 
+// ErrLogoutFailed indica que el fichaje se realizó correctamente pero el cierre
+// de sesión falló. El fichaje sigue contando: sólo la limpieza de sesión falló.
+type ErrLogoutFailed struct{ Err error }
+
+func (e ErrLogoutFailed) Error() string {
+	return "fichaje realizado pero el cierre de sesión falló: " + e.Err.Error()
+}
+func (e ErrLogoutFailed) Unwrap() error { return e.Err }
+
 // These types mirror the ones in main package to build a config value.
 // The actual runAction call happens via the provided ActionFunc.
 
@@ -161,17 +170,18 @@ func (s *Scheduler) Run(ctx context.Context) {
 							c.LocationHomeLat, c.LocationHomeLon,
 							action, scheduledAt, s.dryRun, nil,
 						)
-						status, msg := "ok", locLabel
-						if err != nil {
-							if errors.Is(err, ErrSkipped) {
-								status, msg = "skipped", err.Error()
-								log.Printf("Scheduler [%s]: %s omitido: %s", uid, action, msg)
+						status, msg := statusFor(locLabel, err)
+						switch status {
+						case "skipped":
+							log.Printf("Scheduler [%s]: %s omitido: %s", uid, action, msg)
+						case "ok":
+							if err != nil {
+								log.Printf("Scheduler [%s]: %s completado con aviso: %v", uid, action, err)
 							} else {
-								status, msg = "error", err.Error()
-								log.Printf("Scheduler [%s]: error %s: %v", uid, action, err)
+								log.Printf("Scheduler [%s]: %s completado en %s", uid, action, locLabel)
 							}
-						} else {
-							log.Printf("Scheduler [%s]: %s completado en %s", uid, action, locLabel)
+						default:
+							log.Printf("Scheduler [%s]: error %s: %v", uid, action, err)
 						}
 						dbCtx := context.Background()
 						if logErr := db.InsertCheckinLog(dbCtx, s.pool, uid, action, status, msg, scheduledAt, "scheduled"); logErr != nil {
@@ -272,14 +282,7 @@ func (s *Scheduler) RunForUser(ctx context.Context, userID string, opts RunOptio
 	)
 	duration := time.Since(start)
 
-	status, msg := "ok", locLabel
-	if runErr != nil {
-		if errors.Is(runErr, ErrSkipped) {
-			status, msg = "skipped", runErr.Error()
-		} else {
-			status, msg = "error", runErr.Error()
-		}
-	}
+	status, msg := statusFor(locLabel, runErr)
 
 	// El dry-run se registra con action='TEST' para no confundirse con un fichaje
 	// real de IN/OUT en el historial.
@@ -301,7 +304,7 @@ func (s *Scheduler) RunForUser(ctx context.Context, userID string, opts RunOptio
 		Status:   status,
 		Message:  msg,
 		Duration: duration,
-		Logs:     splitLines(buf.String()),
+		Logs:     tailLogs(buf.String()),
 	}, nil
 }
 
@@ -323,6 +326,53 @@ func splitLines(raw string) []string {
 		return nil
 	}
 	return strings.Split(raw, "\n")
+}
+
+const (
+	// maxLogLines acota el log que se devuelve al panel: las últimas líneas son
+	// las que explican el fallo.
+	maxLogLines = 300
+	// maxLogBytes evita respuestas gigantes si una fase fallida vuelca mucho texto.
+	maxLogBytes = 512 * 1024
+)
+
+// tailLogs devuelve el final del log capturado: como mucho maxLogBytes y las
+// últimas maxLogLines líneas, conservando el orden original.
+func tailLogs(raw string) []string {
+	if len(raw) > maxLogBytes {
+		raw = raw[len(raw)-maxLogBytes:]
+		// El corte puede caer a mitad de línea: se descarta ese resto parcial.
+		if i := strings.IndexByte(raw, '\n'); i >= 0 {
+			raw = raw[i+1:]
+		} else {
+			raw = ""
+		}
+	}
+	lines := splitLines(raw)
+	if len(lines) > maxLogLines {
+		lines = lines[len(lines)-maxLogLines:]
+	}
+	return lines
+}
+
+// statusFor traduce el resultado de una ejecución al estado y mensaje que se
+// guardan en el historial y se envían por WhatsApp.
+//
+// Un ErrLogoutFailed no invalida el fichaje: el botón se pulsó y el registro de
+// horas es correcto, sólo falló el cierre de sesión.
+func statusFor(locLabel string, err error) (string, string) {
+	switch {
+	case err == nil:
+		return "ok", locLabel
+	case errors.Is(err, ErrSkipped):
+		return "skipped", err.Error()
+	default:
+		var logoutErr ErrLogoutFailed
+		if errors.As(err, &logoutErr) {
+			return "ok", locLabel + " — " + err.Error()
+		}
+		return "error", err.Error()
+	}
 }
 
 type scheduledEntry struct {

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -964,6 +965,7 @@ type runResponse struct {
 	Location   string   `json:"location"`
 	Status     string   `json:"status"`
 	Message    string   `json:"message"`
+	Warning    string   `json:"warning,omitempty"`
 	Error      string   `json:"error,omitempty"`
 	DurationMS int64    `json:"duration_ms"`
 	Logs       []string `json:"logs"`
@@ -972,7 +974,10 @@ type runResponse struct {
 func writeRunJSON(w http.ResponseWriter, code int, resp runResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		// Suele significar que el cliente se desconectó a mitad de la respuesta.
+		log.Printf("no se pudo escribir la respuesta JSON: %v", err)
+	}
 }
 
 // runResponseFromResult traduce el resultado del scheduler a la respuesta JSON.
@@ -989,7 +994,27 @@ func runResponseFromResult(res scheduler.RunResult) runResponse {
 	if res.Status == "error" {
 		resp.Error = res.Message
 	}
+	// Un cierre de sesión fallido no invalida el fichaje: se comunica como aviso
+	// y el propio mensaje ya explica que el fichaje se registró.
+	if res.Status == "ok" && strings.Contains(res.Message, "cierre de sesión") {
+		resp.Warning = res.Message
+	}
 	return resp
+}
+
+// watchClientGone registra cuándo el cliente abandona la petición durante la
+// ejecución. Distingue "el panel se fue" de "el servidor se cayó": si el
+// servidor muere no hay ningún log, pero una desconexión sí queda registrada.
+func watchClientGone(r *http.Request, action string) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-r.Context().Done():
+			log.Printf("ejecución bajo demanda (%s): el cliente %s se desconectó", action, r.RemoteAddr)
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
 }
 
 // handleTestRun ejecuta el flujo en modo simulación (dry-run forzado) sin marcar
@@ -1021,8 +1046,22 @@ func handleTestRun(sched *scheduler.Scheduler) http.HandlerFunc {
 			return
 		}
 
+		// Un panic en la ejecución no debe tumbar la conexión sin respuesta: el
+		// navegador lo muestra como "error de red" y se pierde todo el contexto.
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panic en ejecución bajo demanda: %v\n%s", rec, debug.Stack())
+				writeRunJSON(w, http.StatusInternalServerError, runResponse{
+					Status: "error",
+					Action: action,
+					Error:  fmt.Sprintf("error interno del servidor: %v", rec),
+				})
+			}
+		}()
+
 		ctx, cancel := context.WithTimeout(context.Background(), manualRunTimeout)
 		defer cancel()
+		defer watchClientGone(r, "test-run")()
 
 		// DryRun se fuerza aquí: este endpoint nunca marca un fichaje real.
 		res, err := sched.RunForUser(ctx, targetID, scheduler.RunOptions{
@@ -1057,8 +1096,22 @@ func handleManualCheckin(sched *scheduler.Scheduler) http.HandlerFunc {
 		}
 		force := r.FormValue("force") == "1"
 
+		// Un panic en la ejecución no debe tumbar la conexión sin respuesta: el
+		// navegador lo muestra como "error de red" y se pierde todo el contexto.
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("panic en ejecución bajo demanda: %v\n%s", rec, debug.Stack())
+				writeRunJSON(w, http.StatusInternalServerError, runResponse{
+					Status: "error",
+					Action: action,
+					Error:  fmt.Sprintf("error interno del servidor: %v", rec),
+				})
+			}
+		}()
+
 		ctx, cancel := context.WithTimeout(context.Background(), manualRunTimeout)
 		defer cancel()
+		defer watchClientGone(r, "checkin/manual "+action)()
 
 		res, err := sched.RunForUser(ctx, user.ID, scheduler.RunOptions{
 			Action: action,

@@ -456,7 +456,9 @@ func runAction(cfg config, action actionType) (string, error) {
 
 	logger.Println("Cerrando sesión...")
 	if err := doLogout(page, logger); err != nil {
-		return "", fmt.Errorf("logout: %w", err)
+		// El click del fichaje ya se hizo: un fallo de logout no invalida el
+		// registro, así que se conserva la ubicación y se distingue el error.
+		return locLabel, scheduler.ErrLogoutFailed{Err: err}
 	}
 
 	return locLabel, nil

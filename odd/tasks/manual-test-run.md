@@ -1,6 +1,28 @@
 # Feature: Ejecución manual de fichaje y dry-run de diagnóstico
 
-## Estado: implementado y verificado (v0.3.4)
+## Estado: implementado y verificado (v0.3.4) · reporting de errores (v0.3.5)
+
+### v0.3.5 — el panel nunca se queda sin explicación
+
+Un fichaje manual en producción realizó el fichaje pero falló al cerrar sesión, y el panel
+mostró "Error de red al ejecutar el fichaje": el cliente no recibió JSON y el `catch` del
+`fetch` descartaba el log del run, que sí estaba en el servidor. Correcciones:
+
+- `scheduler.ErrLogoutFailed`: el fichaje hecho con el logout fallido se reporta como
+  **ok con aviso**, no como error. El fallo del cierre de sesión no invalida el registro de
+  horas. Afecta al run programado y al bajo demanda (helper `statusFor`).
+- `web.go`: `recover()` en los dos handlers → un panic devuelve JSON 500 legible en vez de
+  tumbar la conexión (lo que el navegador muestra como "error de red"). Se registra el stack.
+- `web.go`: `watchClientGone` distingue "el panel se fue" de "el servidor se cayó" (si el
+  servidor muere no queda log; una desconexión sí se registra).
+- `web.go`: se registra el error al escribir la respuesta JSON (cliente desconectado).
+- `scheduler.tailLogs`: el log devuelto se acota a 300 líneas / 512KB, conservando las más
+  recientes.
+- Plantillas: el `fetch` lee el cuerpo como texto y parsea el JSON con tolerancia; si no es
+  JSON válido muestra el cuerpo y el estado HTTP. El aviso de red dice explícitamente que
+  **el fichaje puede haberse registrado igualmente** y enlaza a `/logs`. El toggle con las
+  líneas de log se muestra también en estado error.
+- `internal/scheduler/status_test.go`: test de regresión del mapeo de estado.
 
 - T1-T5 completadas: migración `006`, propagación de `dryRun`/`source`/`logWriter`,
   `Scheduler.RunForUser`, endpoints `POST /test-run` y `POST /checkin/manual`, UI en
