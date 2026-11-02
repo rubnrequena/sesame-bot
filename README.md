@@ -9,6 +9,7 @@ Incluye una **interfaz web de administración** para modificar la configuración
 - **Scheduling automático:** Ejecuta acciones únicamente a las horas configuradas (`HH:MM`).
 - **Horarios flexibles:** Soporta horario genérico semanal y overrides por día específico.
 - **Control de fin de semana:** Configurable para ejecutar solo en días laborables.
+- **Verificación de festivos:** Consulta la API de Sesame antes de fichar y omite el día si es festivo.
 - **Geolocalización:** Simula ubicación GPS diferente según si el día es de oficina o teletrabajo.
 - **Notificaciones WhatsApp:** Aviso tras cada fichaje (éxito, error u omisión) y **recordatorio matinal** una hora antes del primer fichaje del día.
 - **UI de administración:** Formulario web protegido por contraseña para editar la configuración sin tocar el `.env`.
@@ -36,6 +37,7 @@ cp .env.example .env
 | :--- | :--- | :--- |
 | `HEADLESS` | `false` para ver el navegador (debug) | `true` |
 | `WEEKEND` | `true` para ejecutar también en sábado y domingo | `false` |
+| `HOLIDAY_STRICT` | `true` para **no fichar** cuando no se puede verificar si hoy es festivo. `false` ficha igualmente si falla la verificación. | `false` |
 | `MONDAY_IN`, `FRIDAY_OUT`, etc. | Override de horario para un día concreto. Formato: `DAYNAME_IN` / `DAYNAME_OUT`. Días disponibles: `SUNDAY`, `MONDAY`, `TUESDAY`, `WEDNESDAY`, `THURSDAY`, `FRIDAY`, `SATURDAY` | — |
 
 ### Variables opcionales — geolocalización
@@ -136,8 +138,26 @@ La versión embebida aparece en el primer log al arrancar (`Sesame Bot vX.Y.Z ar
    - Abre Chrome (headless por defecto)
    - Aplica geolocalización GPS si está configurada
    - Navega a `https://app.sesametime.com/login` y hace login
-   - Pulsa `Entrar` o `Salir` según corresponda
+   - Captura el token de la sesión y consulta la API de festivos
+   - Si hoy es festivo, registra la ejecución como `skipped` y **no pulsa**
+   - Si no es festivo, pulsa `Entrar` o `Salir` según corresponda
    - Espera 5 segundos y cierra sesión
+
+## 🎉 Festivos
+
+El bot consulta la API de Sesame después del login, con el token de esa misma
+sesión. El token vive solo en memoria durante la ejecución: no se guarda en la
+base de datos ni en disco, y no se escribe en los logs.
+
+- El empleado se resuelve con `GET /api/v3/security/me` y la lista con
+  `GET /api/v3/employees/{employeeId}/holidays/{year}`.
+- Si hoy aparece en la lista, la ejecución termina con `skipped` y no se pulsa
+  el botón. Aplica a fichajes programados, manuales y al dry-run.
+- Si la API o el token fallan, el comportamiento depende de `HOLIDAY_STRICT`:
+  - `false` (por defecto): se registra el aviso y se ficha igualmente.
+  - `true`: no se ficha; el intento queda como error para que se vea en el panel.
+
+Los logs de esta fase llevan el prefijo `holidays:` para poder filtrarlos.
 
 ## 🔔 Notificaciones WhatsApp
 
@@ -165,3 +185,4 @@ Ejemplo de recordatorio con varios fichajes (entrada a las 09:04 → aviso a las
 2. **Selectores CSS:** Si Sesame Time actualiza su interfaz, los selectores en `main.go` (`#btn-next-login`, `.headerProfileName`, etc.) pueden necesitar actualización.
 3. **Horario no ejecuta:** Asegúrate de que `HOURS_IN` y `HOURS_OUT` están definidos. El bot comprueba cada 30 segundos, por lo que puede tardar hasta 30 s en reaccionar.
 4. **UI no accesible:** Verifica que `ADMIN_PASSWORD` está definido y que el puerto `ADMIN_PORT` no está bloqueado por el firewall.
+5. **Festivos no verificados:** busca `holidays: no se pudo verificar` en el log. Revisa la conectividad con la API de Sesame y que el login haya completado. Con `HOLIDAY_STRICT=true` el bot no ficha en ese caso.

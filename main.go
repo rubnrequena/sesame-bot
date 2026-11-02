@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -72,22 +70,13 @@ type config struct {
 	locationOffice location
 	locationHome   location
 	officeDays     map[time.Weekday]bool
+	// holidayStrict, si es true, no ficha cuando no puede verificar si hoy es
+	// festivo. Por defecto se sigue con el fichaje para no perder una entrada por
+	// un fallo puntual de la API.
+	holidayStrict bool
 	// logWriter, si no es nil, recibe además una copia de las líneas de log del
 	// run. Lo usa la ejecución bajo demanda para devolver el log al panel web.
 	logWriter io.Writer
-}
-
-type holidayEntry struct {
-	Date string `json:"date"` // "YYYY-MM-DD"
-	Name string `json:"name"`
-}
-
-type holidaysPage struct {
-	Data []holidayEntry `json:"data"`
-	Meta struct {
-		CurrentPage int `json:"currentPage"`
-		LastPage    int `json:"lastPage"`
-	} `json:"meta"`
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -154,6 +143,7 @@ func runActionBridge(
 		locationOffice: location{lat: offLat, lon: offLon},
 		locationHome:   location{lat: homeLat, lon: homeLon},
 		officeDays:     parseOfficeDays(officeDays),
+		holidayStrict:  os.Getenv("HOLIDAY_STRICT") == "true",
 		logWriter:      logWriter,
 	}
 	return runAction(cfg, actionType(action))
@@ -234,80 +224,6 @@ func parseTime(raw string) error {
 	return nil
 }
 
-// ─── Holiday helpers ──────────────────────────────────────────────────────────
-
-// startHolidayCapture enables CDP network tracking on the page BEFORE any navigation
-// and listens for the holidays API response that the SPA makes with its own auth session.
-// It returns a wait function that must be called after login to collect the results.
-func startHolidayCapture(page *rod.Page, logger *log.Logger) func() []holidayEntry {
-	type pageResult struct {
-		entries  []holidayEntry
-		lastPage int
-	}
-	ch := make(chan pageResult, 10)
-	year := strconv.Itoa(time.Now().Year())
-
-	if err := (proto.NetworkEnable{}).Call(page); err != nil {
-		logger.Printf("holidays: error habilitando network tracking: %v", err)
-		return func() []holidayEntry { return nil }
-	}
-
-	wait := page.EachEvent(func(e *proto.NetworkResponseReceived) {
-		if !strings.Contains(e.Response.URL, "holidays") || !strings.Contains(e.Response.URL, year) {
-			return
-		}
-		logger.Printf("holidays: respuesta detectada: %s (status %d)", e.Response.URL, e.Response.Status)
-
-		result, err := proto.NetworkGetResponseBody{RequestID: e.RequestID}.Call(page)
-		if err != nil {
-			return // body not yet buffered by Chrome, will be captured on the next event
-		}
-
-		bodyStr := result.Body
-		if result.Base64Encoded {
-			decoded, decErr := base64.StdEncoding.DecodeString(result.Body)
-			if decErr != nil {
-				logger.Printf("holidays: error decodificando base64: %v", decErr)
-				return
-			}
-			bodyStr = string(decoded)
-		}
-
-		var p holidaysPage
-		if err := json.Unmarshal([]byte(bodyStr), &p); err != nil {
-			logger.Printf("holidays: error parseando JSON: %v — body: %.200s", err, bodyStr)
-			return
-		}
-		logger.Printf("holidays: página %d/%d, %d entradas", p.Meta.CurrentPage, p.Meta.LastPage, len(p.Data))
-		select {
-		case ch <- pageResult{p.Data, p.Meta.LastPage}:
-		default:
-			logger.Printf("holidays: canal lleno, descartando página %d", p.Meta.CurrentPage)
-		}
-	})
-	go wait()
-
-	return func() []holidayEntry {
-		select {
-		case first := <-ch:
-			all := first.entries
-			for p := 2; p <= first.lastPage; p++ {
-				select {
-				case next := <-ch:
-					all = append(all, next.entries...)
-				case <-time.After(5 * time.Second):
-					logger.Printf("holidays: timeout esperando página %d/%d", p, first.lastPage)
-				}
-			}
-			logger.Printf("holidays: total %d días libres cargados", len(all))
-			return all
-		case <-time.After(8 * time.Second):
-			logger.Println("holidays: timeout — no se recibió respuesta del endpoint holidays")
-			return nil
-		}
-	}
-}
-
 // ─── Browser automation ───────────────────────────────────────────────────────
 
 func runAction(cfg config, action actionType) (string, error) {
@@ -341,8 +257,11 @@ func runAction(cfg config, action actionType) (string, error) {
 
 	page := browser.MustPage("").Timeout(pageTimeout)
 
-	// Register CDP network listener before any navigation so the SPA request is captured.
-	waitHolidays := startHolidayCapture(page, logger)
+	// La página de login nace con 30s y doLogin renueva solo su copia a 90s. El
+	// listener de red debe vivir en un clon sin deadline o muere antes de capturar
+	// el token cuando el login es lento.
+	capturePage := page.Context(context.Background())
+	waitAuth := startSesameAuthCapture(capturePage, logger)
 
 	loc := getLocationForDay(cfg, day)
 
@@ -392,28 +311,33 @@ func runAction(cfg config, action actionType) (string, error) {
 	}
 	logger.Println("Login exitoso")
 
-	holidays := waitHolidays()
-	today := time.Now().Format("2006-01-02")
-	if len(holidays) == 0 {
-		logger.Println("holidays: sin datos de días libres — se procede con el fichaje")
-	}
-	for _, h := range holidays {
-		if h.Date == today {
-			logger.Printf("Día festivo detectado: %s (%s) — omitiendo fichaje", today, h.Name)
-			return "", fmt.Errorf("%s: %w", h.Name, scheduler.ErrSkipped)
-		}
+	now := time.Now()
+	today := now.Format("2006-01-02")
+
+	auth, authErr := waitAuth()
+	var holidays []holidayEntry
+	holidayErr := authErr
+	if authErr == nil {
+		holidayCtx, holidayCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		holidays, holidayErr = fetchHolidays(holidayCtx, auth, cfg.email, now)
+		holidayCancel()
 	}
 
-	var next *holidayEntry
-	for i := range holidays {
-		if holidays[i].Date > today {
-			if next == nil || holidays[i].Date < next.Date {
-				next = &holidays[i]
-			}
+	if holidayErr != nil {
+		logger.Printf("holidays: no se pudo verificar si hoy es festivo: %v", holidayErr)
+		if cfg.holidayStrict {
+			return "", fmt.Errorf("verificación de festivos: %w", holidayErr)
 		}
-	}
-	if next != nil {
-		logger.Printf("Próximo día libre: %s (%s)", next.Date, next.Name)
+		logger.Println("holidays: se procede con el fichaje (HOLIDAY_STRICT=false)")
+	} else {
+		logger.Printf("holidays: %d días cargados desde la API; hoy %s", len(holidays), today)
+		if name, ok := holidayOn(holidays, today); ok {
+			logger.Printf("Día festivo detectado: %s (%s) — omitiendo fichaje", today, name)
+			return "", fmt.Errorf("%s: %w", name, scheduler.ErrSkipped)
+		}
+		if next := nextHoliday(holidays, today); next != nil {
+			logger.Printf("Próximo día libre: %s (%s)", next.Date, next.Name)
+		}
 	}
 
 	var buttonText string
@@ -423,9 +347,9 @@ func runAction(cfg config, action actionType) (string, error) {
 		buttonText = "Salir"
 	}
 
-	// El deadline global de la página pudo agotarse durante el login y la espera
-	// de holidays; la búsqueda del botón necesita presupuesto propio o fallará
-	// con "context deadline exceeded" aunque el botón ya esté en el DOM.
+	// El deadline global de la página pudo agotarse durante el login y la
+	// verificación de festivos; la búsqueda del botón necesita presupuesto propio
+	// o fallará con "context deadline exceeded" aunque el botón ya esté en el DOM.
 	page = renewPage(page, pageTimeout)
 
 	logger.Printf("Buscando botón %q...", buttonText)
