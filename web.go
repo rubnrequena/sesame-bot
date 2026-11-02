@@ -450,6 +450,39 @@ func handleConfig(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFu
 	}
 }
 
+// ─── Pausa self-service del bot ───────────────────────────────────────────────
+
+// handleConfigBotToggle pausa o reanuda el fichaje automático del usuario
+// autenticado. No toca users.is_active: la cuenta web y el login siguen
+// funcionando; solo el scheduler deja de cargar al usuario.
+func handleConfigBotToggle(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Error al parsear el formulario", http.StatusBadRequest)
+			return
+		}
+
+		user := currentUser(r)
+		enabled := r.FormValue("enabled") == "1"
+		if err := appdb.SetBotEnabled(r.Context(), pool, user.ID, enabled); err != nil {
+			log.Printf("error cambiando bot_enabled de %s: %v", user.ID, err)
+			http.Error(w, "Error actualizando el bot", http.StatusInternalServerError)
+			return
+		}
+
+		estado := "pausado"
+		if enabled {
+			estado = "activado"
+		}
+		log.Printf("Bot automático %s para usuario %s", estado, user.ID)
+		http.Redirect(w, r, "/dashboard", http.StatusFound)
+	}
+}
+
 // ─── Config password ──────────────────────────────────────────────────────────
 
 func handleConfigPassword(pool *pgxpool.Pool, sched *scheduler.Scheduler) http.HandlerFunc {
@@ -1201,6 +1234,7 @@ func startWebServer(pool *pgxpool.Pool, sched *scheduler.Scheduler, wsClient *ws
 
 	mux.HandleFunc("/dashboard", requireAuth(pool, handleDashboard(pool, sched)))
 	mux.HandleFunc("/config", requireAuth(pool, handleConfig(pool, sched)))
+	mux.HandleFunc("/config/bot-toggle", requireAuth(pool, handleConfigBotToggle(pool)))
 	mux.HandleFunc("/config/password", requireAuth(pool, handleConfigPassword(pool, sched)))
 	mux.HandleFunc("/config/account-password", requireAuth(pool, handleConfigAccountPassword(pool)))
 	mux.HandleFunc("/config/day-overrides", requireAuth(pool, handleConfigDayOverrides(pool, sched)))

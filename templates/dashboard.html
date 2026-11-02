@@ -21,7 +21,20 @@
         {{if .PasswordInMemory}}<span class="badge badge-skip" style="margin-left:.35rem">Solo en memoria</span>{{end}}
       </div>
     </div>
+    <div class="stat-box">
+      <div class="stat-label">Bot automático</div>
+      <div class="stat-value">
+        {{if .Config.BotEnabled}}<span class="badge badge-ok">Activo</span>{{else}}<span class="badge badge-inactive">Pausado</span>{{end}}
+        <form method="POST" action="/config/bot-toggle" style="display:inline;margin-left:.5rem">
+          <input type="hidden" name="enabled" value="{{if .Config.BotEnabled}}0{{else}}1{{end}}">
+          <button type="submit" class="btn btn-ghost btn-sm">{{if .Config.BotEnabled}}Pausar{{else}}Reanudar{{end}}</button>
+        </form>
+      </div>
+    </div>
   </div>
+  <p style="font-size:.78rem;color:#6e6e73;margin:.5rem 0 0">
+    Pausar solo detiene el fichaje automático y el recordatorio. La cuenta sigue activa; el dry-run y el fichaje manual siguen disponibles.
+  </p>
   {{else}}
   <div class="flash-err">Configura tu cuenta de Sesame para activar el fichaje automático. <a href="/config">Ir a configuración</a></div>
   {{end}}

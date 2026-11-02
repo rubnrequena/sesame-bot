@@ -109,7 +109,7 @@ func LoadUserWithConfig(ctx context.Context, pool *pgxpool.Pool, userID string) 
 		        c.id, c.user_id, c.sesame_email, c.sesame_password_enc,
 		        c.location_office_lat, c.location_office_lon,
 		        c.location_home_lat, c.location_home_lon,
-		        c.office_days, c.whatsapp_number
+		        c.office_days, c.whatsapp_number, c.bot_enabled
 		 FROM users u
 		 JOIN user_configs c ON c.user_id = u.id
 		 WHERE u.id=$1`, userID,
@@ -118,7 +118,7 @@ func LoadUserWithConfig(ctx context.Context, pool *pgxpool.Pool, userID string) 
 		&c.ID, &c.UserID, &c.SesameEmail, &c.SesamePasswordEnc,
 		&c.LocationOfficeLat, &c.LocationOfficeLon,
 		&c.LocationHomeLat, &c.LocationHomeLon,
-		&c.OfficeDays, &c.WhatsappNumber,
+		&c.OfficeDays, &c.WhatsappNumber, &c.BotEnabled,
 	)
 	if err != nil {
 		return uw, err
@@ -137,12 +137,13 @@ func LoadActiveUsersWithConfig(ctx context.Context, pool *pgxpool.Pool) ([]model
 		        c.id, c.sesame_email, c.sesame_password_enc,
 		        c.location_office_lat, c.location_office_lon,
 		        c.location_home_lat, c.location_home_lon,
-		        c.office_days, c.whatsapp_number
+		        c.office_days, c.whatsapp_number, c.bot_enabled
 		 FROM users u
 		 JOIN user_configs c ON c.user_id = u.id
 		 WHERE u.is_active = TRUE
 		   AND u.is_approved = TRUE
-		   AND c.sesame_email != ''`)
+		   AND c.sesame_email != ''
+		   AND c.bot_enabled = TRUE`)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +159,7 @@ func LoadActiveUsersWithConfig(ctx context.Context, pool *pgxpool.Pool) ([]model
 			&c.ID, &c.SesameEmail, &c.SesamePasswordEnc,
 			&c.LocationOfficeLat, &c.LocationOfficeLon,
 			&c.LocationHomeLat, &c.LocationHomeLon,
-			&c.OfficeDays, &c.WhatsappNumber,
+			&c.OfficeDays, &c.WhatsappNumber, &c.BotEnabled,
 		); err != nil {
 			return nil, err
 		}

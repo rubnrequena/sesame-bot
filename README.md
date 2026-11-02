@@ -9,6 +9,7 @@ Incluye una **interfaz web de administración** para modificar la configuración
 - **Scheduling automático:** Ejecuta acciones únicamente a las horas configuradas (`HH:MM`).
 - **Horarios flexibles:** Soporta horario genérico semanal y overrides por día específico.
 - **Control de fin de semana:** Configurable para ejecutar solo en días laborables.
+- **Pausa self-service:** Cada usuario puede pausar o reanudar su fichaje automático desde el dashboard.
 - **Verificación de festivos:** Consulta la API de Sesame antes de fichar y omite el día si es festivo.
 - **Geolocalización:** Simula ubicación GPS diferente según si el día es de oficina o teletrabajo.
 - **Notificaciones WhatsApp:** Aviso tras cada fichaje (éxito, error u omisión) y **recordatorio matinal** una hora antes del primer fichaje del día.
@@ -88,6 +89,20 @@ Al guardar, los cambios se aplican **inmediatamente** al scheduler en memoria y 
 > ```bash
 > docker run -v $(pwd)/.env:/app/.env --env-file .env ...
 > ```
+
+### Pausar el bot automático
+
+Cada usuario puede pausar o reanudar su propio fichaje automático desde el
+dashboard, sin depender de un administrador. El switch **Bot automático**
+actualiza `user_configs.bot_enabled` con `POST /config/bot-toggle`.
+
+- **Pausado:** no se ejecutan fichajes programados ni el recordatorio matutino.
+  El cambio se aplica en el siguiente tick del scheduler (30 s); una ejecución
+  ya empezada termina.
+- **La cuenta sigue activa:** el login, el dry-run de diagnóstico (`POST /test-run`)
+  y el fichaje manual (`POST /checkin/manual`) siguen funcionando.
+- El switch **no** es `users.is_active`. Ese sigue siendo el control del
+  administrador para dar de baja una cuenta; desactivarlo bloquea el login.
 
 ### Fichaje manual y dry-run de diagnóstico
 

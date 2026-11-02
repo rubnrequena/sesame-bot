@@ -24,6 +24,7 @@ type UserConfig struct {
 	LocationHomeLon   float64
 	OfficeDays        string // "Tuesday,Thursday"
 	WhatsappNumber    string // número de teléfono para notificaciones (ej: 5491112345678)
+	BotEnabled        bool   // pausa self-service del fichaje automático
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }

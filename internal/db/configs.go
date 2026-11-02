@@ -14,14 +14,14 @@ func GetUserConfig(ctx context.Context, pool *pgxpool.Pool, userID string) (*mod
 		`SELECT id, user_id, sesame_email, sesame_password_enc,
 		        location_office_lat, location_office_lon,
 		        location_home_lat, location_home_lon,
-		        office_days, whatsapp_number, created_at, updated_at
+		        office_days, whatsapp_number, bot_enabled, created_at, updated_at
 		 FROM user_configs WHERE user_id=$1`,
 		userID,
 	).Scan(
 		&c.ID, &c.UserID, &c.SesameEmail, &c.SesamePasswordEnc,
 		&c.LocationOfficeLat, &c.LocationOfficeLon,
 		&c.LocationHomeLat, &c.LocationHomeLon,
-		&c.OfficeDays, &c.WhatsappNumber, &c.CreatedAt, &c.UpdatedAt,
+		&c.OfficeDays, &c.WhatsappNumber, &c.BotEnabled, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("obtener config de usuario: %w", err)
@@ -50,6 +50,16 @@ func UpsertUserConfig(ctx context.Context, pool *pgxpool.Pool, c *models.UserCon
 		c.LocationOfficeLat, c.LocationOfficeLon,
 		c.LocationHomeLat, c.LocationHomeLon,
 		c.OfficeDays, c.WhatsappNumber,
+	)
+	return err
+}
+
+// SetBotEnabled pausa o reanuda el fichaje automático de un usuario. No toca
+// users.is_active: la cuenta web y el login siguen funcionando.
+func SetBotEnabled(ctx context.Context, pool *pgxpool.Pool, userID string, enabled bool) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE user_configs SET bot_enabled=$1, updated_at=NOW() WHERE user_id=$2`,
+		enabled, userID,
 	)
 	return err
 }
