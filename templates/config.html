@@ -148,6 +148,27 @@
       </div>
     </div>
 
+    <!-- Modal editar hora (guardar cambios / eliminar) -->
+    <div id="do-edit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center">
+      <div style="background:#fff;border-radius:18px;padding:2rem;width:min(320px,90vw);box-shadow:0 8px 40px rgba(0,0,0,.18)">
+        <h3 id="do-edit-modal-title" style="margin:0 0 1.25rem;font-size:1.05rem;font-weight:600;letter-spacing:-.02em">Editar hora</h3>
+        <label style="margin-top:0">Hora
+          <input type="text" id="do-edit-time" maxlength="5" placeholder="09:00"
+            autocomplete="off" inputmode="numeric"
+            oninput="_doTimeMask(this)"
+            style="margin-top:.5rem;font-size:1.6rem;letter-spacing:.1em;text-align:center;padding:.65rem 1rem">
+        </label>
+        <div style="display:flex;gap:.75rem;margin-top:1.5rem">
+          <button class="btn" onclick="doConfirmEdit()" style="flex:1">Guardar</button>
+          <button class="btn btn-ghost" onclick="doCloseEditModal()" style="flex:1">Cancelar</button>
+        </div>
+        <button type="button" class="btn btn-danger" onclick="doDeleteHourFromModal()" style="width:100%;margin-top:.75rem;display:inline-flex;align-items:center;justify-content:center;gap:.35rem">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+          Eliminar hora
+        </button>
+      </div>
+    </div>
+
     <!-- Modal copiar a otros días -->
     <div id="do-copy-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center">
       <div style="background:#fff;border-radius:18px;padding:2rem;width:min(320px,90vw);box-shadow:0 8px 40px rgba(0,0,0,.18)">
@@ -275,13 +296,11 @@ function _doRender(wd) {
       var pill = document.createElement('span');
       pill.style.cssText = 'display:inline-flex;align-items:center;gap:.25rem;padding:.25rem .65rem;border-radius:20px;font-size:.825rem;font-weight:600;' +
         (isIn ? 'background:#e8f9ee;color:#1a7f4b;' : 'background:#f5f5f7;color:#6e6e73;');
-      var label = document.createElement('span');
-      label.textContent = t;
-      var btn = document.createElement('button');
-      btn.type = 'button'; btn.textContent = '×'; btn.title = 'Eliminar';
-      btn.style.cssText = 'background:none;border:none;padding:0 0 0 .1rem;cursor:pointer;color:inherit;font-size:1rem;line-height:1;opacity:.65;';
-      btn.addEventListener('click', (function(w, idx){ return function(){ _doRemove(w, idx); }; })(wd, i));
-      pill.appendChild(label); pill.appendChild(btn);
+      var label = document.createElement('button');
+      label.type = 'button'; label.textContent = t; label.title = 'Editar hora';
+      label.style.cssText = 'background:none;border:none;padding:0;cursor:pointer;color:inherit;font:inherit;';
+      label.addEventListener('click', (function(w, idx){ return function(){ doOpenEditModal(w, idx); }; })(wd, i));
+      pill.appendChild(label);
       container.appendChild(pill);
     });
   }
@@ -358,6 +377,53 @@ function doConfirmHour() {
   doCloseModal();
 }
 
+var _editWd = null;
+var _editIdx = null;
+
+function doOpenEditModal(wd, idx) {
+  var hours = _dow[wd] || [];
+  if (idx < 0 || idx >= hours.length) return;
+  _editWd = wd;
+  _editIdx = idx;
+  document.getElementById('do-edit-modal-title').textContent = 'Editar hora ' + (idx % 2 === 0 ? '(entrada)' : '(salida)');
+  var inp = document.getElementById('do-edit-time');
+  inp.value = hours[idx];
+  inp.style.borderColor = '#1a7f4b';
+  document.getElementById('do-edit-modal').style.display = 'flex';
+  setTimeout(function(){ inp.focus(); inp.select(); }, 50);
+}
+
+function doCloseEditModal() {
+  document.getElementById('do-edit-modal').style.display = 'none';
+  _editWd = null;
+  _editIdx = null;
+}
+
+function doConfirmEdit() {
+  if (_editWd === null) return;
+  var inp = document.getElementById('do-edit-time');
+  var val = inp.value.trim();
+  var parts = val.split(':');
+  var h = parseInt(parts[0], 10);
+  var m = parseInt(parts[1], 10);
+  if (val.length !== 5 || parts.length !== 2 || isNaN(h) || h < 0 || h > 23 || isNaN(m) || m < 0 || m > 59) {
+    inp.style.borderColor = '#e3001a';
+    inp.focus();
+    return;
+  }
+  _dow[_editWd][_editIdx] = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+  var wd = _editWd;
+  _doRender(wd);
+  doCloseEditModal();
+}
+
+function doDeleteHourFromModal() {
+  if (_editWd === null) return;
+  var wd = _editWd, idx = _editIdx;
+  doCloseEditModal();
+  _doRemove(wd, idx);
+}
+
 function doSetJitter(wd, val, btn) {
   var group = document.getElementById('jitter-' + wd);
   if (!group) return;
@@ -419,10 +485,17 @@ document.getElementById('do-modal').addEventListener('click', function(e) {
 document.getElementById('do-copy-modal').addEventListener('click', function(e) {
   if (e.target === this) doCopyClose();
 });
+document.getElementById('do-edit-modal').addEventListener('click', function(e) {
+  if (e.target === this) doCloseEditModal();
+});
 document.addEventListener('keydown', function(e) {
   if (_modalWd !== null) {
     if (e.key === 'Enter') { e.preventDefault(); doConfirmHour(); }
     if (e.key === 'Escape') doCloseModal();
+  }
+  if (_editWd !== null) {
+    if (e.key === 'Enter') { e.preventDefault(); doConfirmEdit(); }
+    if (e.key === 'Escape') doCloseEditModal();
   }
   if (_copySourceWd !== null && e.key === 'Escape') doCopyClose();
 });
